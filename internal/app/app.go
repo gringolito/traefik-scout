@@ -33,8 +33,9 @@ type App struct {
 	snap   atomic.Pointer[snapshot]
 }
 
-// New validates cfg and returns a ready App.  The App makes no network calls
-// until Refresh is invoked.
+// New returns a ready App configured from cfg.  Config is already validated by
+// config.Load; New always returns a nil error but keeps the error return for
+// future validation at construction time.
 func New(cfg config.Config) (*App, error) {
 	return &App{
 		cfg:    cfg,
@@ -102,6 +103,8 @@ func (a *App) fetchAndMerge(ctx context.Context, ds config.Downstream, out *dyna
 		if r.Status == "disabled" {
 			continue
 		}
+		// A nil allow set means no entrypoints were configured: pass the router
+		// through unconditionally.  Empty AllowedEntrypoints = accept all.
 		if allow != nil && !hasAllowedEntrypoint(r.EntryPoints, allow) {
 			continue
 		}

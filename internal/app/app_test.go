@@ -112,6 +112,21 @@ func routerKeys(env *httpEnvelope) []string {
 	return keys
 }
 
+// refreshAndQuery builds an App from ds using the default test config, calls
+// Refresh, queries the handler, and fatals on any error.
+func refreshAndQuery(t *testing.T, ds *httptest.Server) *httpEnvelope {
+	t.Helper()
+	cfg := testConfig(ds.URL, "http://traffic.example.com:80")
+	a, err := app.New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	return queryHandler(t, a.Handler(), cfg.ConfigPath)
+}
+
 // Cycle 1: New with a valid Config must return a non-nil *App without error.
 func TestNew_ValidConfig(t *testing.T) {
 	cfg := testConfig("http://localhost:8080", "http://localhost:80")
@@ -177,11 +192,7 @@ func TestRefreshAndHandler_ExcludesInternalProvider(t *testing.T) {
 	})
 	defer ds.Close()
 
-	cfg := testConfig(ds.URL, "http://traffic.example.com:80")
-	a, _ := app.New(cfg)
-	_ = a.Refresh(context.Background())
-
-	env := queryHandler(t, a.Handler(), cfg.ConfigPath)
+	env := refreshAndQuery(t, ds)
 
 	if _, ok := env.HTTP.Routers["primary-dashboard"]; ok {
 		t.Error("internal-provider router must not appear in output")
@@ -211,11 +222,7 @@ func TestRefreshAndHandler_ExcludesDisabled(t *testing.T) {
 	})
 	defer ds.Close()
 
-	cfg := testConfig(ds.URL, "http://traffic.example.com:80")
-	a, _ := app.New(cfg)
-	_ = a.Refresh(context.Background())
-
-	env := queryHandler(t, a.Handler(), cfg.ConfigPath)
+	env := refreshAndQuery(t, ds)
 
 	if _, ok := env.HTTP.Routers["primary-off-router"]; ok {
 		t.Error("disabled router must not appear in output")
@@ -247,11 +254,7 @@ func TestRefreshAndHandler_ExcludesNonAllowedEntrypoints(t *testing.T) {
 	defer ds.Close()
 
 	// testConfig sets AllowedEntrypoints: ["web"]; "tcpep" is not in the list.
-	cfg := testConfig(ds.URL, "http://traffic.example.com:80")
-	a, _ := app.New(cfg)
-	_ = a.Refresh(context.Background())
-
-	env := queryHandler(t, a.Handler(), cfg.ConfigPath)
+	env := refreshAndQuery(t, ds)
 
 	if _, ok := env.HTTP.Routers["primary-tcp-router"]; ok {
 		t.Error("router with non-allowed entrypoint must not appear in output")
@@ -275,12 +278,9 @@ func TestRefreshAndHandler_UsesEdgeEntrypoints(t *testing.T) {
 	})
 	defer ds.Close()
 
-	cfg := testConfig(ds.URL, "http://traffic.example.com:80")
-	// EdgeEntrypoints = ["web", "websecure"] (set by testConfig)
-	a, _ := app.New(cfg)
-	_ = a.Refresh(context.Background())
-
-	env := queryHandler(t, a.Handler(), cfg.ConfigPath)
+	// testConfig sets EdgeEntrypoints to ["web", "websecure"]; the output must
+	// carry those, not the downstream's original ["web"].
+	env := refreshAndQuery(t, ds)
 
 	raw, ok := env.HTTP.Routers["primary-my-router"]
 	if !ok {
@@ -294,7 +294,7 @@ func TestRefreshAndHandler_UsesEdgeEntrypoints(t *testing.T) {
 		t.Fatalf("unmarshal router: %v", err)
 	}
 
-	want := cfg.EdgeEntrypoints
+	want := []string{vWeb, "websecure"}
 	if len(r.EntryPoints) != len(want) {
 		t.Fatalf("entryPoints: got %v, want %v", r.EntryPoints, want)
 	}
@@ -376,5 +376,37 @@ func TestRefreshAndHandler_ETagStability(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNotModified {
 		t.Errorf("expected 304 Not Modified, got %d", resp.StatusCode)
+	}
+}
+
+// Spec note: an empty AllowedEntrypoints passes every router through.  The
+// issue AC says "routers without an allow-listed entrypoint are excluded", but
+// an empty list is treated as no filter rather than "exclude all".  This test
+// documents and pins that decision.
+func TestRefreshAndHandler_EmptyAllowListPassesAll(t *testing.T) {
+	ds := fakeDownstream(map[string]any{
+		"any-router@docker": map[string]any{
+			fEntryPoints: []string{"whatever"},
+			fService:     vSvcDocker,
+			fRule:        vExampleRule,
+			fStatus:      vEnabled,
+			fProvider:    vDocker,
+		},
+	})
+	defer ds.Close()
+
+	cfg := testConfig(ds.URL, "http://traffic.example.com:80")
+	cfg.Downstreams[0].AllowedEntrypoints = nil // empty = no filter; all routers pass
+	a, err := app.New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	env := queryHandler(t, a.Handler(), cfg.ConfigPath)
+	if _, ok := env.HTTP.Routers["primary-any-router"]; !ok {
+		t.Error("empty AllowedEntrypoints must pass all routers through")
 	}
 }
