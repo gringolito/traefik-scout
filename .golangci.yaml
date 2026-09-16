@@ -1,0 +1,47 @@
+version: "2"
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - gochecknoinits
+    - goconst
+    - gocritic
+    - godox
+    - gosec
+    - iface
+    - misspell
+    - modernize
+    - nilerr
+    - noctx
+    - prealloc
+    - predeclared
+    - reassign
+    - sloglint
+    - testifylint
+    - testpackage
+    - tparallel
+    - unconvert
+    - unparam
+  settings:
+    sloglint:
+      # "scope" only flags calls where a ctx was genuinely in scope but not used.
+      context: "scope"
+      # Locks in the snake_case key convention that existing lines already
+      # follow (asset_id, request_id, duration_ms, …).
+      key-naming-case: "snake"
+  exclusions:
+    generated: strict
+formatters:
+  enable:
+    - gofmt
+    - gofumpt
+    - goimports
+  settings:
+    gofumpt:
+      module-path: github.com/gringolito/traefik-scout
+    goimports:
+      local-prefixes:
+        - github.com/gringolito/traefik-scout
+  exclusions:
+    generated: strict
