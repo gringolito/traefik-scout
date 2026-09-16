@@ -89,9 +89,10 @@ func rawDefaults() *rawConfig {
 		Listen:          DefaultListen,
 		ConfigPath:      DefaultConfigPath,
 		LogLevel:        DefaultLogLevel,
-		PollInterval:    "30s",
-		RequestTimeout:  "5s",
+		PollInterval:    DefaultPollInterval.String(),
+		RequestTimeout:  DefaultRequestTimeout.String(),
 		MaxResponseSize: DefaultMaxResponseSize,
+		EdgeEntrypoints: []string{},
 	}
 }
 
@@ -137,6 +138,7 @@ func convert(r *rawConfig) (*Config, error) {
 
 	downstreams := make([]Downstream, len(r.Downstreams))
 	for i, rd := range r.Downstreams {
+		// zero means no limit; callers should treat a zero StalenessLimit as unlimited.
 		sl, err := parseOptionalDuration(fmt.Sprintf("downstream[%d].staleness_limit", i), rd.StalenessLimit)
 		if err != nil {
 			return nil, err

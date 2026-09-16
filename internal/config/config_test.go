@@ -126,6 +126,41 @@ func TestLoad_InvalidDownstreamName(t *testing.T) {
 	}
 }
 
+// Review fix: auth, tls, allowed_entrypoints, priority_offset, and
+// staleness_limit must parse cleanly and not be rejected by KnownFields.
+func TestLoad_DownstreamOptionalFields(t *testing.T) {
+	cfg, err := config.Load("testdata/downstream_optional_fields.yaml")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.Downstreams) != 1 {
+		t.Fatalf("expected 1 downstream, got %d", len(cfg.Downstreams))
+	}
+	d := cfg.Downstreams[0]
+
+	if len(d.AllowedEntrypoints) != 2 {
+		t.Errorf("allowed_entrypoints: got %v, want [web websecure]", d.AllowedEntrypoints)
+	}
+	if d.PriorityOffset != 10 {
+		t.Errorf("priority_offset: got %d, want 10", d.PriorityOffset)
+	}
+	if d.StalenessLimit != 2*time.Minute {
+		t.Errorf("staleness_limit: got %v, want 2m", d.StalenessLimit)
+	}
+	if d.Auth == nil {
+		t.Fatal("auth must be populated")
+	}
+	if d.Auth.Username != "admin" {
+		t.Errorf("auth.username: got %q, want %q", d.Auth.Username, "admin")
+	}
+	if d.TLS == nil {
+		t.Fatal("tls must be populated")
+	}
+	if d.TLS.CA != "/etc/ssl/ca.crt" {
+		t.Errorf("tls.ca: got %q, want %q", d.TLS.CA, "/etc/ssl/ca.crt")
+	}
+}
+
 func containsField(err error, field string) bool {
 	return err != nil && strings.Contains(err.Error(), field)
 }
