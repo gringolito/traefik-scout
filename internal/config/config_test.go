@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -52,10 +53,6 @@ func TestLoad_MinimalValid(t *testing.T) {
 	if d.TrafficAddress != "http://traefik-primary:80" {
 		t.Errorf("downstream traffic_address: got %q", d.TrafficAddress)
 	}
-
-	// Verify the type so callers can use cfg.PollInterval directly as time.Duration.
-	var _ time.Duration = cfg.PollInterval
-	var _ time.Duration = cfg.RequestTimeout
 }
 
 // Cycle 2: missing required downstream address fields must produce an error
@@ -111,6 +108,28 @@ func TestLoad_BadDuration(t *testing.T) {
 	}
 	if !containsField(err, "poll_interval") {
 		t.Errorf("error must name 'poll_interval', got: %v", err)
+	}
+}
+
+// Lint cleanup (#12): parseDuration must wrap the underlying time.ParseDuration
+// error with %w so callers can unwrap/errors.Is through the chain.
+func TestLoad_BadDuration_WrapsUnderlyingError(t *testing.T) {
+	_, err := config.Load("testdata/bad_duration.yaml")
+	if err == nil {
+		t.Fatal("expected error for bad duration, got nil")
+	}
+
+	unwrapped := errors.Unwrap(err)
+	if unwrapped == nil {
+		t.Fatal("errors.Unwrap(err) = nil, want the wrapped time.ParseDuration error")
+	}
+
+	_, wantErr := time.ParseDuration("not-a-duration")
+	if wantErr == nil {
+		t.Fatal("time.ParseDuration(\"not-a-duration\") unexpectedly succeeded")
+	}
+	if unwrapped.Error() != wantErr.Error() {
+		t.Errorf("unwrapped error = %q, want %q", unwrapped.Error(), wantErr.Error())
 	}
 }
 
