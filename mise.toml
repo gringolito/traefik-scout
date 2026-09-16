@@ -1,0 +1,20 @@
+# `mise install` to provision the toolchain,
+# `mise tasks` to list tasks
+# `mise run <task>` to execute one.
+
+[tools]
+go = "1.27.0"              # Keep in sync with go.mod
+# golangci-lint is pinned in .tool-versions so CI's golangci-lint-action can
+# read it via `version-file`; mise merges both files.
+
+[tasks.lint]
+description = "Lint Go with golangci-lint"
+run = "golangci-lint run"
+
+[tasks.format]
+description = "Format Go (golangci-lint fmt)"
+run = "golangci-lint fmt"
+
+[tasks.test]
+description = "Run Go tests with coverage"
+run = "go test ./... -coverprofile=cover.out -covermode=atomic -coverpkg=./..."
