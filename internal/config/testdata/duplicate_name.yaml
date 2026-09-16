@@ -1,0 +1,7 @@
+downstreams:
+  - name: primary
+    api_address: http://traefik-primary:8080
+    traffic_address: http://traefik-primary:80
+  - name: primary
+    api_address: http://traefik-secondary:8080
+    traffic_address: http://traefik-secondary:80
