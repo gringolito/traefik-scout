@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/traefik/genconf/dynamic"
+
 	"github.com/gringolito/traefik-scout/internal/config"
 )
 
@@ -43,9 +45,9 @@ func New(cfg config.Config) (*App, error) {
 // Refresh fetches rawdata from every downstream, transforms the routers and
 // services, and atomically replaces the snapshot that Handler serves.
 func (a *App) Refresh(ctx context.Context) error {
-	out := &httpConfig{
-		Routers:  make(map[string]*outRouter),
-		Services: make(map[string]*outService),
+	out := &dynamic.HTTPConfiguration{
+		Routers:  make(map[string]*dynamic.Router),
+		Services: make(map[string]*dynamic.Service),
 	}
 
 	for _, ds := range a.cfg.Downstreams {
@@ -54,7 +56,7 @@ func (a *App) Refresh(ctx context.Context) error {
 		}
 	}
 
-	data, err := json.Marshal(&configOutput{HTTP: out})
+	data, err := json.Marshal(&dynamic.Configuration{HTTP: out})
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
@@ -67,7 +69,7 @@ func (a *App) Refresh(ctx context.Context) error {
 	return nil
 }
 
-func (a *App) fetchAndMerge(ctx context.Context, ds config.Downstream, out *httpConfig) error {
+func (a *App) fetchAndMerge(ctx context.Context, ds config.Downstream, out *dynamic.HTTPConfiguration) error {
 	url := ds.APIAddress + "/api/rawdata"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) //nolint:gosec // URL is operator config, not user input
 	if err != nil {
@@ -107,7 +109,7 @@ func (a *App) fetchAndMerge(ctx context.Context, ds config.Downstream, out *http
 		base := stripProvider(name)
 		outName := ds.Name + "-" + unsafeChars.ReplaceAllString(base, "-")
 
-		out.Routers[outName] = &outRouter{
+		out.Routers[outName] = &dynamic.Router{
 			EntryPoints: a.cfg.EdgeEntrypoints,
 			Service:     ds.Name,
 			Rule:        r.Rule,
@@ -115,10 +117,11 @@ func (a *App) fetchAndMerge(ctx context.Context, ds config.Downstream, out *http
 	}
 
 	// One service per downstream; all its routers point here.
-	out.Services[ds.Name] = &outService{
-		LoadBalancer: &loadBalancer{
-			Servers:        []server{{URL: ds.TrafficAddress}},
-			PassHostHeader: true,
+	passHostHeader := true
+	out.Services[ds.Name] = &dynamic.Service{
+		LoadBalancer: &dynamic.ServersLoadBalancer{
+			Servers:        []dynamic.Server{{URL: ds.TrafficAddress}},
+			PassHostHeader: &passHostHeader,
 		},
 	}
 
