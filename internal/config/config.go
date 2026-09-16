@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"time"
@@ -190,16 +191,30 @@ func validate(cfg *Config) error {
 		if !validName.MatchString(d.Name) {
 			return fmt.Errorf("downstream[%d]: name %q contains invalid characters (allowed: a-z, A-Z, 0-9, _, -)", i, d.Name)
 		}
-		if d.APIAddress == "" {
-			return fmt.Errorf("downstream[%d] (%q): api_address is required", i, d.Name)
+		if err := requireAbsoluteURL("api_address", d.APIAddress); err != nil {
+			return fmt.Errorf("downstream[%d] (%q): %w", i, d.Name, err)
 		}
-		if d.TrafficAddress == "" {
-			return fmt.Errorf("downstream[%d] (%q): traffic_address is required", i, d.Name)
+		if err := requireAbsoluteURL("traffic_address", d.TrafficAddress); err != nil {
+			return fmt.Errorf("downstream[%d] (%q): %w", i, d.Name, err)
 		}
 		if prev, ok := seen[d.Name]; ok {
 			return fmt.Errorf("downstream[%d]: name %q duplicates downstream[%d]", i, d.Name, prev)
 		}
 		seen[d.Name] = i
+	}
+	return nil
+}
+
+// requireAbsoluteURL returns an error when s is empty or is not an absolute URL
+// (scheme + host required).  Malformed addresses caught here produce a startup
+// error rather than a runtime fetch failure after deploy.
+func requireAbsoluteURL(field, s string) error {
+	if s == "" {
+		return fmt.Errorf("%s is required", field)
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("%s %q must be an absolute URL (scheme://host[:port])", field, s)
 	}
 	return nil
 }
