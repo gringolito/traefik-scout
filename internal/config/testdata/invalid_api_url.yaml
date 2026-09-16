@@ -1,0 +1,4 @@
+downstreams:
+  - name: primary
+    api_address: "not-a-url"
+    traffic_address: http://traefik-primary:80

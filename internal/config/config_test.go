@@ -180,6 +180,18 @@ func TestLoad_DownstreamOptionalFields(t *testing.T) {
 	}
 }
 
+// URL validation: a non-absolute api_address must produce an error that names
+// the field and the offending value.
+func TestLoad_InvalidAPIURL(t *testing.T) {
+	_, err := config.Load("testdata/invalid_api_url.yaml")
+	if err == nil {
+		t.Fatal("expected error for non-absolute api_address, got nil")
+	}
+	if !containsField(err, "api_address") {
+		t.Errorf("error must name the field, got: %v", err)
+	}
+}
+
 func containsField(err error, field string) bool {
 	return err != nil && strings.Contains(err.Error(), field)
 }

@@ -78,7 +78,7 @@ func (a *App) fetchAndMerge(ctx context.Context, ds config.Downstream, out *http
 	if err != nil {
 		return fmt.Errorf("fetch %s rawdata: %w", ds.Name, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("downstream %s: unexpected status %d", ds.Name, resp.StatusCode)

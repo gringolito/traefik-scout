@@ -13,6 +13,22 @@ import (
 	"github.com/gringolito/traefik-scout/internal/config"
 )
 
+// rawdata fixture field names and common values used across multiple tests.
+const (
+	fEntryPoints = "entryPoints"
+	fService     = "service"
+	fRule        = "rule"
+	fStatus      = "status"
+	fProvider    = "provider"
+
+	vEnabled     = "enabled"
+	vDocker      = "docker"
+	vWeb         = "web"
+	vMyRouter    = "my-router@docker"
+	vSvcDocker   = "svc@docker"
+	vExampleRule = `Host("example.com")`
+)
+
 // testConfig returns a minimal Config with one downstream pointed at apiURL,
 // serving traffic to trafficURL.  EdgeEntrypoints are ["web", "websecure"].
 func testConfig(apiURL, trafficURL string) config.Config {
@@ -22,14 +38,14 @@ func testConfig(apiURL, trafficURL string) config.Config {
 		PollInterval:    30 * time.Second,
 		RequestTimeout:  5 * time.Second,
 		MaxResponseSize: 10 * 1024 * 1024,
-		EdgeEntrypoints: []string{"web", "websecure"},
+		EdgeEntrypoints: []string{vWeb, "websecure"},
 		LogLevel:        "info",
 		Downstreams: []config.Downstream{
 			{
 				Name:               "primary",
 				APIAddress:         apiURL,
 				TrafficAddress:     trafficURL,
-				AllowedEntrypoints: []string{"web"},
+				AllowedEntrypoints: []string{vWeb},
 			},
 		},
 	}
@@ -67,11 +83,15 @@ func queryHandler(t *testing.T, h http.Handler, path string) *httpEnvelope {
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 
-	resp, err := http.Get(srv.URL + path) //nolint:gosec
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+path, nil) //nolint:gosec
+	if err != nil {
+		t.Fatalf("build request %s: %v", path, err)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET %s: %v", path, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -108,12 +128,12 @@ func TestNew_ValidConfig(t *testing.T) {
 // router and service entries when Handler is queried.
 func TestRefreshAndHandler_HappyPath(t *testing.T) {
 	ds := fakeDownstream(map[string]any{
-		"my-router@docker": map[string]any{
-			"entryPoints": []string{"web"},
-			"service":     "my-svc@docker",
-			"rule":        `Host("example.com")`,
-			"status":      "enabled",
-			"provider":    "docker",
+		vMyRouter: map[string]any{
+			fEntryPoints: []string{vWeb},
+			fService:     "my-svc@docker",
+			fRule:        vExampleRule,
+			fStatus:      vEnabled,
+			fProvider:    vDocker,
 		},
 	})
 	defer ds.Close()
@@ -141,18 +161,18 @@ func TestRefreshAndHandler_HappyPath(t *testing.T) {
 func TestRefreshAndHandler_ExcludesInternalProvider(t *testing.T) {
 	ds := fakeDownstream(map[string]any{
 		"dashboard@internal": map[string]any{
-			"entryPoints": []string{"web"},
-			"service":     "dashboard@internal",
-			"rule":        `PathPrefix("/api")`,
-			"status":      "enabled",
-			"provider":    "internal",
+			fEntryPoints: []string{vWeb},
+			fService:     "dashboard@internal",
+			fRule:        `PathPrefix("/api")`,
+			fStatus:      vEnabled,
+			fProvider:    "internal",
 		},
 		"good-router@docker": map[string]any{
-			"entryPoints": []string{"web"},
-			"service":     "svc@docker",
-			"rule":        `Host("example.com")`,
-			"status":      "enabled",
-			"provider":    "docker",
+			fEntryPoints: []string{vWeb},
+			fService:     vSvcDocker,
+			fRule:        vExampleRule,
+			fStatus:      vEnabled,
+			fProvider:    vDocker,
 		},
 	})
 	defer ds.Close()
@@ -175,18 +195,18 @@ func TestRefreshAndHandler_ExcludesInternalProvider(t *testing.T) {
 func TestRefreshAndHandler_ExcludesDisabled(t *testing.T) {
 	ds := fakeDownstream(map[string]any{
 		"off-router@docker": map[string]any{
-			"entryPoints": []string{"web"},
-			"service":     "svc@docker",
-			"rule":        `Host("off.example.com")`,
-			"status":      "disabled",
-			"provider":    "docker",
+			fEntryPoints: []string{vWeb},
+			fService:     vSvcDocker,
+			fRule:        `Host("off.example.com")`,
+			fStatus:      "disabled",
+			fProvider:    vDocker,
 		},
 		"on-router@docker": map[string]any{
-			"entryPoints": []string{"web"},
-			"service":     "svc@docker",
-			"rule":        `Host("on.example.com")`,
-			"status":      "enabled",
-			"provider":    "docker",
+			fEntryPoints: []string{vWeb},
+			fService:     vSvcDocker,
+			fRule:        `Host("on.example.com")`,
+			fStatus:      vEnabled,
+			fProvider:    vDocker,
 		},
 	})
 	defer ds.Close()
@@ -210,18 +230,18 @@ func TestRefreshAndHandler_ExcludesDisabled(t *testing.T) {
 func TestRefreshAndHandler_ExcludesNonAllowedEntrypoints(t *testing.T) {
 	ds := fakeDownstream(map[string]any{
 		"tcp-router@docker": map[string]any{
-			"entryPoints": []string{"tcpep"},
-			"service":     "svc@docker",
-			"rule":        `Host("tcp.example.com")`,
-			"status":      "enabled",
-			"provider":    "docker",
+			fEntryPoints: []string{"tcpep"},
+			fService:     vSvcDocker,
+			fRule:        `Host("tcp.example.com")`,
+			fStatus:      vEnabled,
+			fProvider:    vDocker,
 		},
 		"web-router@docker": map[string]any{
-			"entryPoints": []string{"web"},
-			"service":     "svc@docker",
-			"rule":        `Host("web.example.com")`,
-			"status":      "enabled",
-			"provider":    "docker",
+			fEntryPoints: []string{vWeb},
+			fService:     vSvcDocker,
+			fRule:        `Host("web.example.com")`,
+			fStatus:      vEnabled,
+			fProvider:    vDocker,
 		},
 	})
 	defer ds.Close()
@@ -245,12 +265,12 @@ func TestRefreshAndHandler_ExcludesNonAllowedEntrypoints(t *testing.T) {
 // not the downstream's original entrypoints.
 func TestRefreshAndHandler_UsesEdgeEntrypoints(t *testing.T) {
 	ds := fakeDownstream(map[string]any{
-		"my-router@docker": map[string]any{
-			"entryPoints": []string{"web"}, // downstream entrypoint
-			"service":     "svc@docker",
-			"rule":        `Host("example.com")`,
-			"status":      "enabled",
-			"provider":    "docker",
+		vMyRouter: map[string]any{
+			fEntryPoints: []string{vWeb}, // downstream entrypoint
+			fService:     vSvcDocker,
+			fRule:        vExampleRule,
+			fStatus:      vEnabled,
+			fProvider:    vDocker,
 		},
 	})
 	defer ds.Close()
@@ -289,12 +309,12 @@ func TestRefreshAndHandler_UsesEdgeEntrypoints(t *testing.T) {
 // output; a conditional GET with the ETag from the first cycle receives 304.
 func TestRefreshAndHandler_ETagStability(t *testing.T) {
 	ds := fakeDownstream(map[string]any{
-		"my-router@docker": map[string]any{
-			"entryPoints": []string{"web"},
-			"service":     "svc@docker",
-			"rule":        `Host("example.com")`,
-			"status":      "enabled",
-			"provider":    "docker",
+		vMyRouter: map[string]any{
+			fEntryPoints: []string{vWeb},
+			fService:     vSvcDocker,
+			fRule:        vExampleRule,
+			fStatus:      vEnabled,
+			fProvider:    vDocker,
 		},
 	})
 	defer ds.Close()
@@ -307,11 +327,15 @@ func TestRefreshAndHandler_ETagStability(t *testing.T) {
 
 	get := func(label string) (body []byte, etag string) {
 		t.Helper()
-		resp, err := http.Get(srv.URL + cfg.ConfigPath) //nolint:gosec
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+cfg.ConfigPath, nil) //nolint:gosec
+		if err != nil {
+			t.Fatalf("%s build request: %v", label, err)
+		}
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("%s GET: %v", label, err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		b, err := io.ReadAll(resp.Body)
 		if err != nil {
 			t.Fatalf("%s read body: %v", label, err)
@@ -340,13 +364,16 @@ func TestRefreshAndHandler_ETagStability(t *testing.T) {
 	}
 
 	// Conditional GET with the stable ETag must yield 304.
-	req, _ := http.NewRequest(http.MethodGet, srv.URL+cfg.ConfigPath, nil)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+cfg.ConfigPath, nil) //nolint:gosec
+	if err != nil {
+		t.Fatalf("conditional GET request: %v", err)
+	}
 	req.Header.Set("If-None-Match", etag1)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("conditional GET: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNotModified {
 		t.Errorf("expected 304 Not Modified, got %d", resp.StatusCode)
 	}
