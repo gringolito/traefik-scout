@@ -22,8 +22,8 @@ const (
 
 // Config holds the complete, validated application configuration.
 type Config struct {
-	Listen          string        `yaml:"listen"`
-	ConfigPath      string        `yaml:"config_path"`
+	Listen          string `yaml:"listen"`
+	ConfigPath      string `yaml:"config_path"`
 	PollInterval    time.Duration
 	RequestTimeout  time.Duration
 	MaxResponseSize int64
@@ -98,11 +98,11 @@ func rawDefaults() *rawConfig {
 
 // Load reads the YAML file at path, applies defaults, and returns a validated Config.
 func Load(path string) (*Config, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // path is operator-supplied (CLI/config flag), not untrusted input
 	if err != nil {
 		return nil, fmt.Errorf("open config: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	raw := rawDefaults()
 
@@ -170,7 +170,7 @@ func convert(r *rawConfig) (*Config, error) {
 func parseDuration(field, s string) (time.Duration, error) {
 	d, err := time.ParseDuration(s)
 	if err != nil {
-		return 0, fmt.Errorf("%s: invalid duration %q: %v", field, s, err)
+		return 0, fmt.Errorf("%s: invalid duration %q: %w", field, s, err)
 	}
 	return d, nil
 }
