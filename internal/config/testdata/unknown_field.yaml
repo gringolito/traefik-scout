@@ -1,0 +1,6 @@
+listen: ":9090"
+typo_field: oops
+downstreams:
+  - name: primary
+    api_address: http://traefik-primary:8080
+    traffic_address: http://traefik-primary:80
