@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -16,6 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/traefik/genconf/dynamic"
 
 	"github.com/gringolito/traefik-scout/internal/config"
@@ -48,6 +51,71 @@ type pollState struct {
 	// staleness, so the withdrawal WARN fires only on the transition into
 	// withdrawal instead of on every subsequent cycle.
 	stale bool
+}
+
+// labelName is the per-downstream metric label.
+const labelName = "name"
+
+// metrics bundles the Prometheus collectors owned by one App.  They live on a
+// dedicated registry (not the global default) so multiple App instances do
+// not collide.
+type metrics struct {
+	reg         *prometheus.Registry
+	lastSuccess *prometheus.GaugeVec
+	attempts    *prometheus.CounterVec
+	failures    *prometheus.CounterVec
+	duration    *prometheus.HistogramVec
+	routers     prometheus.Gauge
+	generation  prometheus.Counter
+}
+
+func newMetrics() *metrics {
+	m := &metrics{
+		reg: prometheus.NewRegistry(),
+		lastSuccess: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "scout_downstream_last_success_timestamp_seconds",
+				Help: "Unix timestamp of the most recent successful poll per downstream.",
+			},
+			[]string{labelName},
+		),
+		attempts: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "scout_downstream_poll_attempts_total",
+				Help: "Total downstream poll attempts, including retries.",
+			},
+			[]string{labelName},
+		),
+		failures: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "scout_downstream_poll_failures_total",
+				Help: "Total downstream polls that failed all retry attempts.",
+			},
+			[]string{labelName},
+		),
+		duration: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "scout_downstream_poll_duration_seconds",
+				Help:    "Duration of one full poll (including retries) per downstream.",
+				Buckets: prometheus.DefBuckets,
+			},
+			[]string{labelName},
+		),
+		routers: prometheus.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "scout_routers",
+				Help: "Number of routers in the latest served merged snapshot.",
+			},
+		),
+		generation: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Name: "scout_merged_output_generation_total",
+				Help: "Times the merged output actually changed across Refresh cycles.",
+			},
+		),
+	}
+	m.reg.MustRegister(m.lastSuccess, m.attempts, m.failures, m.duration, m.routers, m.generation)
+	return m
 }
 
 // Option configures an App at construction time.
@@ -90,7 +158,12 @@ type App struct {
 	// sleep pauses between fetch-retry attempts, injectable for
 	// deterministic tests.
 	sleep func(time.Duration)
-	snap  atomic.Pointer[snapshot]
+	// everSucceeded records whether any downstream has ever been polled
+	// successfully.  Atomic so /readyz can read it from handler goroutines.
+	everSucceeded atomic.Bool
+	// metrics owns this App's Prometheus collectors and registry.
+	metrics *metrics
+	snap    atomic.Pointer[snapshot]
 }
 
 // New returns a ready App configured from cfg.  Config is already validated by
@@ -111,6 +184,7 @@ func New(cfg config.Config, opts ...Option) (*App, error) {
 		log:      slog.Default(),
 		lastGood: make(map[string]*rawdataResponse),
 		state:    make(map[string]*pollState),
+		metrics:  newMetrics(),
 		now:      time.Now,
 		sleep:    time.Sleep,
 	}
@@ -191,6 +265,12 @@ func newMergeResult() *mergeResult {
 //
 // Duplicate routing rules across downstreams are logged at WARN but still
 // served, letting Traefik resolve the conflict by priority.
+//
+// Observability: one DEBUG line per downstream per cycle records the poll
+// outcome; an INFO line is emitted exactly when the merged output changes
+// across cycles (never when it is unchanged).  Poll attempts, failures,
+// duration, last-success time, and the served router count are exported as
+// Prometheus metrics on /metrics.
 func (a *App) Refresh(ctx context.Context) error {
 	result := newMergeResult()
 	contributed := false
@@ -205,11 +285,22 @@ func (a *App) Refresh(ctx context.Context) error {
 		}
 
 		var raw *rawdataResponse
+		// Touching the failure counter creates the per-downstream child so a
+		// zero value is still exposed before the first failure.
+		failures := a.metrics.failures.WithLabelValues(ds.Name)
+		start := a.now()
 		if r, err := a.fetchWithRetry(ctx, ds); err != nil {
+			failures.Inc()
 			a.log.WarnContext(ctx, "poll failed, using last-known-good",
 				"downstream", ds.Name, "error", err, "attempts", fetchRetryMaxAttempts)
 			raw = a.lastGood[ds.Name] // nil when this downstream has never succeeded
+			a.log.DebugContext(ctx, "downstream polled",
+				"downstream", ds.Name, "success", false)
 		} else {
+			a.everSucceeded.Store(true)
+			a.metrics.lastSuccess.WithLabelValues(ds.Name).Set(float64(a.now().Unix()))
+			a.log.DebugContext(ctx, "downstream polled",
+				"downstream", ds.Name, "success", true)
 			if st.stale {
 				st.stale = false
 				a.log.InfoContext(ctx, "stale downstream recovered, reinstating routes",
@@ -219,6 +310,7 @@ func (a *App) Refresh(ctx context.Context) error {
 			a.lastGood[ds.Name] = r // store even when zero routers (valid empty result)
 			raw = r
 		}
+		a.metrics.duration.WithLabelValues(ds.Name).Observe(a.now().Sub(start).Seconds())
 
 		// Withdraw routes once the last successful poll is older than the limit.
 		if raw != nil && ds.StalenessLimit > 0 {
@@ -263,10 +355,20 @@ func (a *App) Refresh(ctx context.Context) error {
 	}
 
 	sum := sha256.Sum256(data)
+	prev := a.snap.Load()
+	if prev == nil || !bytes.Equal(prev.data, data) {
+		// The merged output genuinely changed: publish a new generation and
+		// log it.  Unchanged output still stores (the atomic swap for readers
+		// is preserved) but does not count as a new generation.
+		a.metrics.generation.Inc()
+		a.log.InfoContext(ctx, "merged configuration changed",
+			"routers", len(result.out.Routers))
+	}
 	a.snap.Store(&snapshot{
 		data: data,
 		etag: fmt.Sprintf(`"%x"`, sum[:8]),
 	})
+	a.metrics.routers.Set(float64(len(result.out.Routers)))
 	return nil
 }
 
@@ -279,6 +381,7 @@ func (a *App) fetchWithRetry(ctx context.Context, ds config.Downstream) (*rawdat
 		err error
 	)
 	for attempt := 1; attempt <= fetchRetryMaxAttempts; attempt++ {
+		a.metrics.attempts.WithLabelValues(ds.Name).Inc()
 		if raw, err = a.fetchRawData(ctx, ds); err == nil {
 			return raw, nil
 		}
@@ -406,12 +509,31 @@ func hasAllowedEntrypoint(eps []string, allow map[string]struct{}) bool {
 	return false
 }
 
-// Handler returns an http.Handler that serves the current snapshot at the
-// configured path.  Reads from an atomically-swapped pointer so an in-flight
-// Refresh never blocks a request.
+// Handler returns an http.Handler serving:
+//
+//   - the configured snapshot path (a.serveSnapshot)
+//   - /healthz: always 200 while the process is serving, independent of
+//     downstream health
+//   - /readyz: 200 once at least one downstream has ever been polled
+//     successfully (cumulative), 503 before that
+//   - /metrics: Prometheus exposition from the App's dedicated registry
+//
+// Reads from an atomically-swapped pointer so an in-flight Refresh never
+// blocks a request.
 func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(a.cfg.ConfigPath, a.serveSnapshot)
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if !a.everSucceeded.Load() {
+			http.Error(w, "no downstream polled successfully yet", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.Handle("/metrics", promhttp.HandlerFor(a.metrics.reg, promhttp.HandlerOpts{}))
 	return mux
 }
 

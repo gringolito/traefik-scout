@@ -50,6 +50,8 @@ const (
 	valueGpu             = "gpu"
 	valueTrafficPrimary  = "http://primary:80"
 	valueTrafficGpu      = "http://gpu:80"
+	valueTrafficHostA    = "http://host-a:80"
+	valueTrafficHostB    = "http://host-b:80"
 	valueTrafficExample  = "http://traffic.example.com:80"
 	valueDownstreamHostA = "host-a"
 	valueDownstreamHostB = "host-b"
@@ -546,8 +548,8 @@ func TestRefresh_RouterNameCollision_BothPrefixed(t *testing.T) {
 	defer ds2.Close()
 
 	cfg := multiConfig([]config.Downstream{
-		{Name: valueDownstreamHostA, APIAddress: ds1.URL, TrafficAddress: "http://host-a:80", AllowedEntrypoints: []string{valueWeb}},
-		{Name: valueDownstreamHostB, APIAddress: ds2.URL, TrafficAddress: "http://host-b:80", AllowedEntrypoints: []string{valueWeb}},
+		{Name: valueDownstreamHostA, APIAddress: ds1.URL, TrafficAddress: valueTrafficHostA, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valueDownstreamHostB, APIAddress: ds2.URL, TrafficAddress: valueTrafficHostB, AllowedEntrypoints: []string{valueWeb}},
 	})
 
 	a, err := app.New(cfg)
@@ -624,8 +626,8 @@ func TestRefresh_IdenticalRule_WarnAndServe(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
 	cfg := multiConfig([]config.Downstream{
-		{Name: valueDownstreamHostA, APIAddress: ds1.URL, TrafficAddress: "http://host-a:80", AllowedEntrypoints: []string{valueWeb}},
-		{Name: valueDownstreamHostB, APIAddress: ds2.URL, TrafficAddress: "http://host-b:80", AllowedEntrypoints: []string{valueWeb}},
+		{Name: valueDownstreamHostA, APIAddress: ds1.URL, TrafficAddress: valueTrafficHostA, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valueDownstreamHostB, APIAddress: ds2.URL, TrafficAddress: valueTrafficHostB, AllowedEntrypoints: []string{valueWeb}},
 	})
 
 	a, err := app.New(cfg, app.WithLogger(logger))
@@ -637,6 +639,9 @@ func TestRefresh_IdenticalRule_WarnAndServe(t *testing.T) {
 	}
 
 	logOut := logBuf.String()
+	if !strings.Contains(logOut, "level=WARN") || !strings.Contains(logOut, "identical routing rule detected") {
+		t.Errorf("rule collision must produce a WARN 'identical routing rule detected' line; log:\n%s", logOut)
+	}
 	if !strings.Contains(logOut, valueDownstreamHostA) {
 		t.Errorf("warning log does not name downstream host-a; log:\n%s", logOut)
 	}
