@@ -1,11 +1,15 @@
 package app_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,18 +19,33 @@ import (
 
 // rawdata fixture field names and common values used across multiple tests.
 const (
-	fEntryPoints = "entryPoints"
-	fService     = "service"
-	fRule        = "rule"
-	fStatus      = "status"
-	fProvider    = "provider"
+	fieldEntryPoints = "entryPoints"
+	fieldService     = "service"
+	fieldRule        = "rule"
+	fieldStatus      = "status"
+	fieldProvider    = "provider"
 
-	vEnabled     = "enabled"
-	vDocker      = "docker"
-	vWeb         = "web"
-	vMyRouter    = "my-router@docker"
-	vSvcDocker   = "svc@docker"
-	vExampleRule = `Host("example.com")`
+	valueEnabled         = "enabled"
+	valueDocker          = "docker"
+	valueWeb             = "web"
+	valueWebsecure       = "websecure"
+	valueMyRouter        = "my-router@docker"
+	valueSvcDocker       = "svc@docker"
+	valueExampleRule     = `Host("example.com")`
+	valueHostA           = `Host("a.example.com")`
+	valueHostB           = `Host("b.example.com")`
+	valueAppA            = "app-a@docker"
+	valueAppB            = "app-b@docker"
+	valuePrimary         = "primary"
+	valueGpu             = "gpu"
+	valueTrafficPrimary  = "http://primary:80"
+	valueTrafficGpu      = "http://gpu:80"
+	valueTrafficExample  = "http://traffic.example.com:80"
+	valueDownstreamHostA = "host-a"
+	valueDownstreamHostB = "host-b"
+	valuePrimaryMyRouter = "primary-my-router"
+	valuePrimaryAppA     = "primary-app-a"
+	valueGpuAppB         = "gpu-app-b"
 )
 
 // testConfig returns a minimal Config with one downstream pointed at apiURL,
@@ -38,16 +57,28 @@ func testConfig(apiURL, trafficURL string) config.Config {
 		PollInterval:    30 * time.Second,
 		RequestTimeout:  5 * time.Second,
 		MaxResponseSize: 10 * 1024 * 1024,
-		EdgeEntrypoints: []string{vWeb, "websecure"},
+		EdgeEntrypoints: []string{valueWeb, valueWebsecure},
 		LogLevel:        "info",
 		Downstreams: []config.Downstream{
 			{
-				Name:               "primary",
+				Name:               valuePrimary,
 				APIAddress:         apiURL,
 				TrafficAddress:     trafficURL,
-				AllowedEntrypoints: []string{vWeb},
+				AllowedEntrypoints: []string{valueWeb},
 			},
 		},
+	}
+}
+
+// multiConfig returns a Config suited for multi-downstream tests.
+// EdgeEntrypoints are ["websecure"]; all other timing/size fields are test defaults.
+func multiConfig(downstreams []config.Downstream) config.Config {
+	return config.Config{
+		ConfigPath:      "/config",
+		RequestTimeout:  5 * time.Second,
+		MaxResponseSize: 10 * 1024 * 1024,
+		EdgeEntrypoints: []string{valueWebsecure},
+		Downstreams:     downstreams,
 	}
 }
 
@@ -66,6 +97,34 @@ func fakeDownstream(routers map[string]any) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(body)
 	}))
+}
+
+// sequencedDownstream starts an httptest.Server whose /api/rawdata responses
+// cycle through responses in order.  A nil entry produces a 500.
+func sequencedDownstream(t *testing.T, responses []map[string]any) *httptest.Server {
+	t.Helper()
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/rawdata" {
+			http.NotFound(w, r)
+			return
+		}
+		i := int(n.Add(1)-1) % len(responses)
+		routers := responses[i]
+		if routers == nil {
+			http.Error(w, "upstream error", http.StatusInternalServerError)
+			return
+		}
+		body, err := json.Marshal(map[string]any{"routers": routers})
+		if err != nil {
+			http.Error(w, "marshal error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
 }
 
 // httpEnvelope is the top-level shape we expect the handler to serve.
@@ -116,7 +175,7 @@ func routerKeys(env *httpEnvelope) []string {
 // Refresh, queries the handler, and fatals on any error.
 func refreshAndQuery(t *testing.T, ds *httptest.Server) *httpEnvelope {
 	t.Helper()
-	cfg := testConfig(ds.URL, "http://traffic.example.com:80")
+	cfg := testConfig(ds.URL, valueTrafficExample)
 	a, err := app.New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -143,17 +202,17 @@ func TestNew_ValidConfig(t *testing.T) {
 // router and service entries when Handler is queried.
 func TestRefreshAndHandler_HappyPath(t *testing.T) {
 	ds := fakeDownstream(map[string]any{
-		vMyRouter: map[string]any{
-			fEntryPoints: []string{vWeb},
-			fService:     "my-svc@docker",
-			fRule:        vExampleRule,
-			fStatus:      vEnabled,
-			fProvider:    vDocker,
+		valueMyRouter: map[string]any{
+			fieldEntryPoints: []string{valueWeb},
+			fieldService:     "my-svc@docker",
+			fieldRule:        valueExampleRule,
+			fieldStatus:      valueEnabled,
+			fieldProvider:    valueDocker,
 		},
 	})
 	defer ds.Close()
 
-	cfg := testConfig(ds.URL, "http://traffic.example.com:80")
+	cfg := testConfig(ds.URL, valueTrafficExample)
 	a, err := app.New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -164,11 +223,11 @@ func TestRefreshAndHandler_HappyPath(t *testing.T) {
 
 	env := queryHandler(t, a.Handler(), cfg.ConfigPath)
 
-	if _, ok := env.HTTP.Routers["primary-my-router"]; !ok {
-		t.Errorf("expected router %q; got %v", "primary-my-router", routerKeys(env))
+	if _, ok := env.HTTP.Routers[valuePrimaryMyRouter]; !ok {
+		t.Errorf("expected router %q; got %v", valuePrimaryMyRouter, routerKeys(env))
 	}
-	if _, ok := env.HTTP.Services["primary"]; !ok {
-		t.Errorf("expected service %q", "primary")
+	if _, ok := env.HTTP.Services[valuePrimary]; !ok {
+		t.Errorf("expected service %q", valuePrimary)
 	}
 }
 
@@ -176,18 +235,18 @@ func TestRefreshAndHandler_HappyPath(t *testing.T) {
 func TestRefreshAndHandler_ExcludesInternalProvider(t *testing.T) {
 	ds := fakeDownstream(map[string]any{
 		"dashboard@internal": map[string]any{
-			fEntryPoints: []string{vWeb},
-			fService:     "dashboard@internal",
-			fRule:        `PathPrefix("/api")`,
-			fStatus:      vEnabled,
-			fProvider:    "internal",
+			fieldEntryPoints: []string{valueWeb},
+			fieldService:     "dashboard@internal",
+			fieldRule:        `PathPrefix("/api")`,
+			fieldStatus:      valueEnabled,
+			fieldProvider:    "internal",
 		},
 		"good-router@docker": map[string]any{
-			fEntryPoints: []string{vWeb},
-			fService:     vSvcDocker,
-			fRule:        vExampleRule,
-			fStatus:      vEnabled,
-			fProvider:    vDocker,
+			fieldEntryPoints: []string{valueWeb},
+			fieldService:     valueSvcDocker,
+			fieldRule:        valueExampleRule,
+			fieldStatus:      valueEnabled,
+			fieldProvider:    valueDocker,
 		},
 	})
 	defer ds.Close()
@@ -206,18 +265,18 @@ func TestRefreshAndHandler_ExcludesInternalProvider(t *testing.T) {
 func TestRefreshAndHandler_ExcludesDisabled(t *testing.T) {
 	ds := fakeDownstream(map[string]any{
 		"off-router@docker": map[string]any{
-			fEntryPoints: []string{vWeb},
-			fService:     vSvcDocker,
-			fRule:        `Host("off.example.com")`,
-			fStatus:      "disabled",
-			fProvider:    vDocker,
+			fieldEntryPoints: []string{valueWeb},
+			fieldService:     valueSvcDocker,
+			fieldRule:        `Host("off.example.com")`,
+			fieldStatus:      "disabled",
+			fieldProvider:    valueDocker,
 		},
 		"on-router@docker": map[string]any{
-			fEntryPoints: []string{vWeb},
-			fService:     vSvcDocker,
-			fRule:        `Host("on.example.com")`,
-			fStatus:      vEnabled,
-			fProvider:    vDocker,
+			fieldEntryPoints: []string{valueWeb},
+			fieldService:     valueSvcDocker,
+			fieldRule:        `Host("on.example.com")`,
+			fieldStatus:      valueEnabled,
+			fieldProvider:    valueDocker,
 		},
 	})
 	defer ds.Close()
@@ -237,18 +296,18 @@ func TestRefreshAndHandler_ExcludesDisabled(t *testing.T) {
 func TestRefreshAndHandler_ExcludesNonAllowedEntrypoints(t *testing.T) {
 	ds := fakeDownstream(map[string]any{
 		"tcp-router@docker": map[string]any{
-			fEntryPoints: []string{"tcpep"},
-			fService:     vSvcDocker,
-			fRule:        `Host("tcp.example.com")`,
-			fStatus:      vEnabled,
-			fProvider:    vDocker,
+			fieldEntryPoints: []string{"tcpep"},
+			fieldService:     valueSvcDocker,
+			fieldRule:        `Host("tcp.example.com")`,
+			fieldStatus:      valueEnabled,
+			fieldProvider:    valueDocker,
 		},
 		"web-router@docker": map[string]any{
-			fEntryPoints: []string{vWeb},
-			fService:     vSvcDocker,
-			fRule:        `Host("web.example.com")`,
-			fStatus:      vEnabled,
-			fProvider:    vDocker,
+			fieldEntryPoints: []string{valueWeb},
+			fieldService:     valueSvcDocker,
+			fieldRule:        `Host("web.example.com")`,
+			fieldStatus:      valueEnabled,
+			fieldProvider:    valueDocker,
 		},
 	})
 	defer ds.Close()
@@ -268,12 +327,12 @@ func TestRefreshAndHandler_ExcludesNonAllowedEntrypoints(t *testing.T) {
 // not the downstream's original entrypoints.
 func TestRefreshAndHandler_UsesEdgeEntrypoints(t *testing.T) {
 	ds := fakeDownstream(map[string]any{
-		vMyRouter: map[string]any{
-			fEntryPoints: []string{vWeb}, // downstream entrypoint
-			fService:     vSvcDocker,
-			fRule:        vExampleRule,
-			fStatus:      vEnabled,
-			fProvider:    vDocker,
+		valueMyRouter: map[string]any{
+			fieldEntryPoints: []string{valueWeb}, // downstream entrypoint
+			fieldService:     valueSvcDocker,
+			fieldRule:        valueExampleRule,
+			fieldStatus:      valueEnabled,
+			fieldProvider:    valueDocker,
 		},
 	})
 	defer ds.Close()
@@ -282,7 +341,7 @@ func TestRefreshAndHandler_UsesEdgeEntrypoints(t *testing.T) {
 	// carry those, not the downstream's original ["web"].
 	env := refreshAndQuery(t, ds)
 
-	raw, ok := env.HTTP.Routers["primary-my-router"]
+	raw, ok := env.HTTP.Routers[valuePrimaryMyRouter]
 	if !ok {
 		t.Fatal("expected router primary-my-router")
 	}
@@ -294,7 +353,7 @@ func TestRefreshAndHandler_UsesEdgeEntrypoints(t *testing.T) {
 		t.Fatalf("unmarshal router: %v", err)
 	}
 
-	want := []string{vWeb, "websecure"}
+	want := []string{valueWeb, valueWebsecure}
 	if len(r.EntryPoints) != len(want) {
 		t.Fatalf("entryPoints: got %v, want %v", r.EntryPoints, want)
 	}
@@ -309,17 +368,17 @@ func TestRefreshAndHandler_UsesEdgeEntrypoints(t *testing.T) {
 // output; a conditional GET with the ETag from the first cycle receives 304.
 func TestRefreshAndHandler_ETagStability(t *testing.T) {
 	ds := fakeDownstream(map[string]any{
-		vMyRouter: map[string]any{
-			fEntryPoints: []string{vWeb},
-			fService:     vSvcDocker,
-			fRule:        vExampleRule,
-			fStatus:      vEnabled,
-			fProvider:    vDocker,
+		valueMyRouter: map[string]any{
+			fieldEntryPoints: []string{valueWeb},
+			fieldService:     valueSvcDocker,
+			fieldRule:        valueExampleRule,
+			fieldStatus:      valueEnabled,
+			fieldProvider:    valueDocker,
 		},
 	})
 	defer ds.Close()
 
-	cfg := testConfig(ds.URL, "http://traffic.example.com:80")
+	cfg := testConfig(ds.URL, valueTrafficExample)
 	a, _ := app.New(cfg)
 
 	srv := httptest.NewServer(a.Handler())
@@ -386,16 +445,16 @@ func TestRefreshAndHandler_ETagStability(t *testing.T) {
 func TestRefreshAndHandler_EmptyAllowListPassesAll(t *testing.T) {
 	ds := fakeDownstream(map[string]any{
 		"any-router@docker": map[string]any{
-			fEntryPoints: []string{"whatever"},
-			fService:     vSvcDocker,
-			fRule:        vExampleRule,
-			fStatus:      vEnabled,
-			fProvider:    vDocker,
+			fieldEntryPoints: []string{"whatever"},
+			fieldService:     valueSvcDocker,
+			fieldRule:        valueExampleRule,
+			fieldStatus:      valueEnabled,
+			fieldProvider:    valueDocker,
 		},
 	})
 	defer ds.Close()
 
-	cfg := testConfig(ds.URL, "http://traffic.example.com:80")
+	cfg := testConfig(ds.URL, valueTrafficExample)
 	cfg.Downstreams[0].AllowedEntrypoints = nil // empty = no filter; all routers pass
 	a, err := app.New(cfg)
 	if err != nil {
@@ -408,5 +467,275 @@ func TestRefreshAndHandler_EmptyAllowListPassesAll(t *testing.T) {
 	env := queryHandler(t, a.Handler(), cfg.ConfigPath)
 	if _, ok := env.HTTP.Routers["primary-any-router"]; !ok {
 		t.Error("empty AllowedEntrypoints must pass all routers through")
+	}
+}
+
+// Issue #4 — Cycle 1: three downstreams with distinct routes all appear in the
+// merged Handler response.
+func TestRefresh_ThreeDownstreams_AllRoutesAppear(t *testing.T) {
+	ds1 := fakeDownstream(map[string]any{
+		valueAppA: map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: valueHostA, fieldStatus: valueEnabled, fieldProvider: valueDocker},
+	})
+	ds2 := fakeDownstream(map[string]any{
+		valueAppB: map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: valueHostB, fieldStatus: valueEnabled, fieldProvider: valueDocker},
+	})
+	ds3 := fakeDownstream(map[string]any{
+		"app-c@docker": map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: `Host("c.example.com")`, fieldStatus: valueEnabled, fieldProvider: valueDocker},
+	})
+	defer ds1.Close()
+	defer ds2.Close()
+	defer ds3.Close()
+
+	cfg := multiConfig([]config.Downstream{
+		{Name: valuePrimary, APIAddress: ds1.URL, TrafficAddress: valueTrafficPrimary, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valueGpu, APIAddress: ds2.URL, TrafficAddress: valueTrafficGpu, AllowedEntrypoints: []string{valueWeb}},
+		{Name: "k8s", APIAddress: ds3.URL, TrafficAddress: "http://k8s:80", AllowedEntrypoints: []string{valueWeb}},
+	})
+
+	a, err := app.New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	env := queryHandler(t, a.Handler(), cfg.ConfigPath)
+
+	for _, key := range []string{valuePrimaryAppA, valueGpuAppB, "k8s-app-c"} {
+		if _, ok := env.HTTP.Routers[key]; !ok {
+			t.Errorf("missing router %q in merged config; got %v", key, routerKeys(env))
+		}
+	}
+}
+
+// Issue #4 — Cycle 2: two downstreams that both define a router with the same
+// base name each appear under their own prefixed key; neither overwrites the other.
+func TestRefresh_RouterNameCollision_BothPrefixed(t *testing.T) {
+	ds1 := fakeDownstream(map[string]any{
+		"dashboard@docker": map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: valueHostA, fieldStatus: valueEnabled, fieldProvider: valueDocker},
+	})
+	ds2 := fakeDownstream(map[string]any{
+		"dashboard@docker": map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: valueHostB, fieldStatus: valueEnabled, fieldProvider: valueDocker},
+	})
+	defer ds1.Close()
+	defer ds2.Close()
+
+	cfg := multiConfig([]config.Downstream{
+		{Name: valueDownstreamHostA, APIAddress: ds1.URL, TrafficAddress: "http://host-a:80", AllowedEntrypoints: []string{valueWeb}},
+		{Name: valueDownstreamHostB, APIAddress: ds2.URL, TrafficAddress: "http://host-b:80", AllowedEntrypoints: []string{valueWeb}},
+	})
+
+	a, err := app.New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	env := queryHandler(t, a.Handler(), cfg.ConfigPath)
+
+	if _, ok := env.HTTP.Routers["host-a-dashboard"]; !ok {
+		t.Error("missing router host-a-dashboard")
+	}
+	if _, ok := env.HTTP.Routers["host-b-dashboard"]; !ok {
+		t.Error("missing router host-b-dashboard")
+	}
+	if len(env.HTTP.Routers) != 2 {
+		t.Errorf("want exactly 2 routers, got %d: %v", len(env.HTTP.Routers), routerKeys(env))
+	}
+}
+
+// Issue #4 — Cycle 3: a configured priority offset appears on the emitted router.
+func TestRefresh_PriorityOffset(t *testing.T) {
+	ds := fakeDownstream(map[string]any{
+		"app-x@docker": map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: `Host("x.example.com")`, fieldStatus: valueEnabled, fieldProvider: valueDocker},
+	})
+	defer ds.Close()
+
+	cfg := multiConfig([]config.Downstream{
+		{Name: "edge", APIAddress: ds.URL, TrafficAddress: "http://edge:80", AllowedEntrypoints: []string{valueWeb}, PriorityOffset: 100},
+	})
+
+	a, err := app.New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	env := queryHandler(t, a.Handler(), cfg.ConfigPath)
+
+	raw, ok := env.HTTP.Routers["edge-app-x"]
+	if !ok {
+		t.Fatal("missing router edge-app-x")
+	}
+	var r struct {
+		Priority int `json:"priority"`
+	}
+	if err := json.Unmarshal(raw, &r); err != nil {
+		t.Fatalf("unmarshal router: %v", err)
+	}
+	if r.Priority != 100 {
+		t.Errorf("Priority: got %d, want 100", r.Priority)
+	}
+}
+
+// Issue #4 — Cycle 4: two downstreams contributing an identical rule produce a
+// WARN log naming both downstream names, and both routers are still served.
+func TestRefresh_IdenticalRule_WarnAndServe(t *testing.T) {
+	sharedRule := `Host("shared.example.com")`
+	ds1 := fakeDownstream(map[string]any{
+		"app-shared@docker": map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: sharedRule, fieldStatus: valueEnabled, fieldProvider: valueDocker},
+	})
+	ds2 := fakeDownstream(map[string]any{
+		"app-shared2@docker": map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: sharedRule, fieldStatus: valueEnabled, fieldProvider: valueDocker},
+	})
+	defer ds1.Close()
+	defer ds2.Close()
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	cfg := multiConfig([]config.Downstream{
+		{Name: valueDownstreamHostA, APIAddress: ds1.URL, TrafficAddress: "http://host-a:80", AllowedEntrypoints: []string{valueWeb}},
+		{Name: valueDownstreamHostB, APIAddress: ds2.URL, TrafficAddress: "http://host-b:80", AllowedEntrypoints: []string{valueWeb}},
+	})
+
+	a, err := app.New(cfg, app.WithLogger(logger))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	logOut := logBuf.String()
+	if !strings.Contains(logOut, valueDownstreamHostA) {
+		t.Errorf("warning log does not name downstream host-a; log:\n%s", logOut)
+	}
+	if !strings.Contains(logOut, valueDownstreamHostB) {
+		t.Errorf("warning log does not name downstream host-b; log:\n%s", logOut)
+	}
+
+	env := queryHandler(t, a.Handler(), cfg.ConfigPath)
+	if _, ok := env.HTTP.Routers["host-a-app-shared"]; !ok {
+		t.Error("missing router host-a-app-shared")
+	}
+	if _, ok := env.HTTP.Routers["host-b-app-shared2"]; !ok {
+		t.Error("missing router host-b-app-shared2")
+	}
+}
+
+// Issue #4 / #16: a downstream that has never succeeded contributes nothing
+// for that cycle; routes from healthy downstreams still appear.
+func TestRefresh_FailingDownstream_HealthyDownstreamsStillServed(t *testing.T) {
+	// A closed server simulates a downstream that has never been reachable
+	// (no last-known-good data).
+	dead := fakeDownstream(map[string]any{})
+	dead.Close()
+
+	live := fakeDownstream(map[string]any{
+		valueAppA: map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: valueHostA, fieldStatus: valueEnabled, fieldProvider: valueDocker},
+	})
+	defer live.Close()
+
+	cfg := multiConfig([]config.Downstream{
+		{Name: "dead", APIAddress: dead.URL, TrafficAddress: "http://dead:80", AllowedEntrypoints: []string{valueWeb}},
+		{Name: "live", APIAddress: live.URL, TrafficAddress: "http://live:80", AllowedEntrypoints: []string{valueWeb}},
+	})
+
+	a, err := app.New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh must not fail when a downstream is unreachable: %v", err)
+	}
+
+	env := queryHandler(t, a.Handler(), cfg.ConfigPath)
+	if _, ok := env.HTTP.Routers["live-app-a"]; !ok {
+		t.Error("healthy downstream's router must appear when another downstream is unreachable")
+	}
+}
+
+// Issue #16: when a downstream fails after having been healthy, its
+// last-known-good routes are retained in the merged output.  Routes from
+// healthy downstreams reflect the latest poll.
+func TestRefresh_FailingDownstream_LastGoodRoutesRetained(t *testing.T) {
+	// primary: healthy in cycle 1, returns 500 in cycle 2.
+	primary := sequencedDownstream(t, []map[string]any{
+		{valueAppA: map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: valueHostA, fieldStatus: valueEnabled, fieldProvider: valueDocker}},
+		nil, // cycle 2: 500
+	})
+	// gpu: healthy in both cycles.
+	gpu := sequencedDownstream(t, []map[string]any{
+		{valueAppB: map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: valueHostB, fieldStatus: valueEnabled, fieldProvider: valueDocker}},
+		{valueAppB: map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: valueHostB, fieldStatus: valueEnabled, fieldProvider: valueDocker}},
+	})
+
+	cfg := multiConfig([]config.Downstream{
+		{Name: valuePrimary, APIAddress: primary.URL, TrafficAddress: valueTrafficPrimary, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valueGpu, APIAddress: gpu.URL, TrafficAddress: valueTrafficGpu, AllowedEntrypoints: []string{valueWeb}},
+	})
+
+	a, err := app.New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := a.Refresh(context.Background()); err != nil {
+		t.Fatalf("cycle 1 Refresh: %v", err)
+	}
+	if err := a.Refresh(context.Background()); err != nil {
+		t.Fatalf("cycle 2 Refresh: %v", err)
+	}
+
+	env := queryHandler(t, a.Handler(), cfg.ConfigPath)
+	if _, ok := env.HTTP.Routers[valuePrimaryAppA]; !ok {
+		t.Error("failing downstream's last-good routes must still be served after a poll failure")
+	}
+	if _, ok := env.HTTP.Routers[valueGpuAppB]; !ok {
+		t.Error("healthy downstream's routes must still be served")
+	}
+}
+
+// Issue #16: when all downstreams fail but each has last-known-good data,
+// the previous routes are retained for every downstream.
+func TestRefresh_AllDownstreamsFail_LastGoodRoutesRetained(t *testing.T) {
+	primary := sequencedDownstream(t, []map[string]any{
+		{valueAppA: map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: valueHostA, fieldStatus: valueEnabled, fieldProvider: valueDocker}},
+		nil, // cycle 2: 500
+	})
+	gpu := sequencedDownstream(t, []map[string]any{
+		{valueAppB: map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: valueHostB, fieldStatus: valueEnabled, fieldProvider: valueDocker}},
+		nil, // cycle 2: 500
+	})
+
+	cfg := multiConfig([]config.Downstream{
+		{Name: valuePrimary, APIAddress: primary.URL, TrafficAddress: valueTrafficPrimary, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valueGpu, APIAddress: gpu.URL, TrafficAddress: valueTrafficGpu, AllowedEntrypoints: []string{valueWeb}},
+	})
+
+	a, err := app.New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := a.Refresh(context.Background()); err != nil {
+		t.Fatalf("cycle 1 Refresh: %v", err)
+	}
+	if err := a.Refresh(context.Background()); err != nil {
+		t.Fatalf("cycle 2 Refresh: %v", err)
+	}
+
+	env := queryHandler(t, a.Handler(), cfg.ConfigPath)
+	if _, ok := env.HTTP.Routers[valuePrimaryAppA]; !ok {
+		t.Error("primary routes must be retained when all downstreams fail")
+	}
+	if _, ok := env.HTTP.Routers[valueGpuAppB]; !ok {
+		t.Error("gpu routes must be retained when all downstreams fail")
 	}
 }
