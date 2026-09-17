@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -194,4 +195,144 @@ func TestLoad_InvalidAPIURL(t *testing.T) {
 
 func containsField(err error, field string) bool {
 	return err != nil && strings.Contains(err.Error(), field)
+}
+
+// writeYAML writes content to a temp file and returns the path.
+func writeYAML(t *testing.T, content string) string {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
+	if err != nil {
+		t.Fatalf("create temp file: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatalf("write yaml: %v", err)
+	}
+	return f.Name()
+}
+
+// Auth.headers must parse from YAML and be accessible on Downstream.Auth.
+func TestLoad_DownstreamAuthHeaders(t *testing.T) {
+	path := writeYAML(t, `
+downstreams:
+  - name: primary
+    api_address: http://traefik:8080
+    traffic_address: http://traefik:80
+    auth:
+      headers:
+        Authorization: "Bearer mytoken"
+        X-Api-Key: "my-api-key"
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	d := cfg.Downstreams[0]
+	if d.Auth == nil {
+		t.Fatal("auth must be populated")
+	}
+	if d.Auth.Headers["Authorization"] != "Bearer mytoken" {
+		t.Errorf("Authorization header: got %q, want %q", d.Auth.Headers["Authorization"], "Bearer mytoken")
+	}
+	if d.Auth.Headers["X-Api-Key"] != "my-api-key" {
+		t.Errorf("X-Api-Key header: got %q, want %q", d.Auth.Headers["X-Api-Key"], "my-api-key")
+	}
+}
+
+// auth.username set without auth.password must fail at startup.
+func TestLoad_AuthUsernameWithoutPassword_ReturnsError(t *testing.T) {
+	path := writeYAML(t, `
+downstreams:
+  - name: primary
+    api_address: http://traefik:8080
+    traffic_address: http://traefik:80
+    auth:
+      username: alice
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for username without password, got nil")
+	}
+	if !containsField(err, "username") && !containsField(err, "password") {
+		t.Errorf("error must name username or password, got: %v", err)
+	}
+}
+
+// auth.password set without auth.username must fail at startup.
+func TestLoad_AuthPasswordWithoutUsername_ReturnsError(t *testing.T) {
+	path := writeYAML(t, `
+downstreams:
+  - name: primary
+    api_address: http://traefik:8080
+    traffic_address: http://traefik:80
+    auth:
+      password: secret
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for password without username, got nil")
+	}
+	if !containsField(err, "username") && !containsField(err, "password") {
+		t.Errorf("error must name username or password, got: %v", err)
+	}
+}
+
+// tls.cert set without tls.key must fail at startup with a message naming the fields.
+func TestLoad_TLSCertWithoutKey_ReturnsError(t *testing.T) {
+	path := writeYAML(t, `
+downstreams:
+  - name: primary
+    api_address: http://traefik:8080
+    traffic_address: http://traefik:80
+    tls:
+      cert: /etc/ssl/client.crt
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for cert without key, got nil")
+	}
+	if !containsField(err, "cert") && !containsField(err, "key") {
+		t.Errorf("error must name cert or key, got: %v", err)
+	}
+}
+
+// tls.key set without tls.cert must fail at startup with a message naming the fields.
+func TestLoad_TLSKeyWithoutCert_ReturnsError(t *testing.T) {
+	path := writeYAML(t, `
+downstreams:
+  - name: primary
+    api_address: http://traefik:8080
+    traffic_address: http://traefik:80
+    tls:
+      key: /etc/ssl/client.key
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for key without cert, got nil")
+	}
+	if !containsField(err, "cert") && !containsField(err, "key") {
+		t.Errorf("error must name cert or key, got: %v", err)
+	}
+}
+
+// auth.headers and auth.username/password cannot both be set.
+func TestLoad_AuthHeadersAndBasicAuth_ReturnsError(t *testing.T) {
+	path := writeYAML(t, `
+downstreams:
+  - name: primary
+    api_address: http://traefik:8080
+    traffic_address: http://traefik:80
+    auth:
+      headers:
+        X-Api-Key: mykey
+      username: alice
+      password: secret
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for headers combined with username/password, got nil")
+	}
+	if !containsField(err, "headers") && !containsField(err, "username") {
+		t.Errorf("error must name headers or username, got: %v", err)
+	}
 }

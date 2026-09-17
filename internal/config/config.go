@@ -47,9 +47,9 @@ type Downstream struct {
 
 // Auth holds credentials for accessing a downstream's Traefik API.
 type Auth struct {
-	Username string `yaml:"username"`
-	Password string `yaml:"password"`
-	Token    string `yaml:"token"`
+	Username string            `yaml:"username"`
+	Password string            `yaml:"password"`
+	Headers  map[string]string `yaml:"headers"`
 }
 
 // TLS holds TLS configuration for connecting to a downstream's Traefik API.
@@ -196,6 +196,19 @@ func validate(cfg *Config) error {
 		}
 		if err := requireAbsoluteURL("traffic_address", d.TrafficAddress); err != nil {
 			return fmt.Errorf("downstream[%d] (%q): %w", i, d.Name, err)
+		}
+		if d.Auth != nil {
+			if (d.Auth.Username == "") != (d.Auth.Password == "") {
+				return fmt.Errorf("downstream[%d] (%q): auth.username and auth.password must both be set together", i, d.Name)
+			}
+			if len(d.Auth.Headers) > 0 && d.Auth.Username != "" {
+				return fmt.Errorf("downstream[%d] (%q): auth.headers and auth.username/password are mutually exclusive", i, d.Name)
+			}
+		}
+		if d.TLS != nil {
+			if (d.TLS.Cert == "") != (d.TLS.Key == "") {
+				return fmt.Errorf("downstream[%d] (%q): tls.cert and tls.key must both be set together", i, d.Name)
+			}
 		}
 		if prev, ok := seen[d.Name]; ok {
 			return fmt.Errorf("downstream[%d]: name %q duplicates downstream[%d]", i, d.Name, prev)
