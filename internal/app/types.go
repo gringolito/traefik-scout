@@ -14,4 +14,5 @@ type rawRouter struct {
 	// Status is "enabled", "disabled", or "warning".
 	Status   string `json:"status"`
 	Provider string `json:"provider"`
+	Priority int    `json:"priority"`
 }
