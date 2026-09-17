@@ -30,6 +30,26 @@ type snapshot struct {
 	etag string
 }
 
+// fetchRetryMaxAttempts bounds in-cycle retries for a failing downstream;
+// fetchRetryBaseDelay doubles per attempt up to fetchRetryMaxDelay.
+const (
+	fetchRetryMaxAttempts = 3
+	fetchRetryBaseDelay   = 500 * time.Millisecond
+	fetchRetryMaxDelay    = 2 * time.Second
+)
+
+// pollState tracks one downstream's staleness bookkeeping across Refresh
+// cycles.
+type pollState struct {
+	// lastSuccess is the time of the most recent successful poll; zero when
+	// the downstream has never succeeded.
+	lastSuccess time.Time
+	// stale records whether the downstream is currently withdrawn for
+	// staleness, so the withdrawal WARN fires only on the transition into
+	// withdrawal instead of on every subsequent cycle.
+	stale bool
+}
+
 // Option configures an App at construction time.
 type Option func(*App)
 
@@ -37,6 +57,19 @@ type Option func(*App)
 // Defaults to slog.Default() when not supplied.
 func WithLogger(l *slog.Logger) Option {
 	return func(a *App) { a.log = l }
+}
+
+// WithClock overrides the App's time source, defaulting to time.Now.
+// Intended for injecting a deterministic clock in tests.
+func WithClock(now func() time.Time) Option {
+	return func(a *App) { a.now = now }
+}
+
+// WithSleep overrides the delay mechanism used between fetch-retry attempts,
+// defaulting to time.Sleep. Intended for injecting a fast, deterministic
+// sleep in tests.
+func WithSleep(sleep func(time.Duration)) Option {
+	return func(a *App) { a.sleep = sleep }
 }
 
 // App polls downstream Traefik instances and serves their merged route
@@ -49,7 +82,15 @@ type App struct {
 	// It is only accessed during Refresh, which the caller must not invoke
 	// concurrently.
 	lastGood map[string]*rawdataResponse
-	snap     atomic.Pointer[snapshot]
+	// state holds per-downstream retry bookkeeping, accessed under the same
+	// single-caller constraint as lastGood.
+	state map[string]*pollState
+	// now is the time source, injectable for deterministic tests.
+	now func() time.Time
+	// sleep pauses between fetch-retry attempts, injectable for
+	// deterministic tests.
+	sleep func(time.Duration)
+	snap  atomic.Pointer[snapshot]
 }
 
 // New returns a ready App configured from cfg.  Config is already validated by
@@ -69,6 +110,9 @@ func New(cfg config.Config, opts ...Option) (*App, error) {
 		clients:  clients,
 		log:      slog.Default(),
 		lastGood: make(map[string]*rawdataResponse),
+		state:    make(map[string]*pollState),
+		now:      time.Now,
+		sleep:    time.Sleep,
 	}
 	for _, o := range opts {
 		o(a)
@@ -132,31 +176,64 @@ func newMergeResult() *mergeResult {
 	}
 }
 
-// Refresh polls every downstream, falls back to last-known-good data on
-// failure, and atomically replaces the snapshot that Handler serves.
+// Refresh polls every downstream, merges their routes, and atomically
+// replaces the snapshot Handler serves.
 //
-// A downstream that fails to respond is logged at WARN; its most recent
-// successful response is used instead so its routes remain in the merged
-// output.  Only when a downstream has never responded successfully does it
-// contribute nothing for that cycle.  If no downstream contributes any data
-// (all failed, none have prior data), the existing snapshot is kept rather
-// than replacing it with an empty configuration.
+// A downstream that fails is retried up to fetchRetryMaxAttempts times with
+// capped exponential backoff, then falls back to its last-known-good data,
+// or nothing if it has never succeeded. HTTP 200 with zero routers is a
+// valid empty result, not a failure.
 //
-// After merging, identical routing rules contributed by different downstreams
-// are logged at WARN naming both contributors; the configuration is still
-// served so Traefik can resolve the conflict by priority.
+// An optional per-downstream StalenessLimit withdraws a downstream's routes
+// once its last successful poll is older than the limit, and reinstates them
+// on the next success without a restart. If nothing was contributed or
+// withdrawn, the existing snapshot is kept.
+//
+// Duplicate routing rules across downstreams are logged at WARN but still
+// served, letting Traefik resolve the conflict by priority.
 func (a *App) Refresh(ctx context.Context) error {
 	result := newMergeResult()
 	contributed := false
+	// withdrew forces a republish when staleness removed the only contributor.
+	withdrew := false
 
 	for _, ds := range a.cfg.Downstreams {
-		raw, err := a.fetchRawData(ctx, ds)
-		if err != nil {
+		st := a.state[ds.Name]
+		if st == nil {
+			st = &pollState{}
+			a.state[ds.Name] = st
+		}
+
+		var raw *rawdataResponse
+		if r, err := a.fetchWithRetry(ctx, ds); err != nil {
 			a.log.WarnContext(ctx, "poll failed, using last-known-good",
-				"downstream", ds.Name, "error", err)
+				"downstream", ds.Name, "error", err, "attempts", fetchRetryMaxAttempts)
 			raw = a.lastGood[ds.Name] // nil when this downstream has never succeeded
 		} else {
-			a.lastGood[ds.Name] = raw // store even when zero routers (valid empty result)
+			if st.stale {
+				st.stale = false
+				a.log.InfoContext(ctx, "stale downstream recovered, reinstating routes",
+					"downstream", ds.Name)
+			}
+			st.lastSuccess = a.now()
+			a.lastGood[ds.Name] = r // store even when zero routers (valid empty result)
+			raw = r
+		}
+
+		// Withdraw routes once the last successful poll is older than the limit.
+		if raw != nil && ds.StalenessLimit > 0 {
+			if st.lastSuccess.IsZero() || a.now().Sub(st.lastSuccess) > ds.StalenessLimit {
+				// Log once on the transition into withdrawal, not every cycle.
+				if !st.stale {
+					st.stale = true
+					a.log.WarnContext(ctx, "downstream stale, withdrawing routes",
+						"downstream", ds.Name,
+						"last_success", st.lastSuccess,
+						"staleness_limit", ds.StalenessLimit)
+				}
+				raw = nil
+				withdrew = true
+			}
 		}
 
 		if raw == nil {
@@ -166,9 +243,8 @@ func (a *App) Refresh(ctx context.Context) error {
 		a.mergeDownstream(ds, raw, result)
 	}
 
-	// Nothing to merge: all downstreams failed and none have prior data.
-	// Retain the existing snapshot instead of overwriting it with empty output.
-	if !contributed {
+	// Nothing changed: keep the existing snapshot instead of clearing it.
+	if !contributed && !withdrew {
 		return nil
 	}
 
@@ -192,6 +268,32 @@ func (a *App) Refresh(ctx context.Context) error {
 		etag: fmt.Sprintf(`"%x"`, sum[:8]),
 	})
 	return nil
+}
+
+// fetchWithRetry retries fetchRawData up to fetchRetryMaxAttempts times with
+// capped exponential backoff, returning early on success or context
+// cancellation.
+func (a *App) fetchWithRetry(ctx context.Context, ds config.Downstream) (*rawdataResponse, error) {
+	var (
+		raw *rawdataResponse
+		err error
+	)
+	for attempt := 1; attempt <= fetchRetryMaxAttempts; attempt++ {
+		if raw, err = a.fetchRawData(ctx, ds); err == nil {
+			return raw, nil
+		}
+		if attempt == fetchRetryMaxAttempts {
+			break
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		delay := min(fetchRetryBaseDelay<<uint(attempt-1), fetchRetryMaxDelay)
+		a.log.DebugContext(ctx, "retrying downstream poll",
+			"downstream", ds.Name, "attempt", attempt+1, "delay", delay, "error", err)
+		a.sleep(delay)
+	}
+	return nil, err
 }
 
 // fetchRawData fetches and decodes one downstream's /api/rawdata.

@@ -62,6 +62,7 @@ const (
 const (
 	rawdataPath      = "/api/rawdata"
 	jsonFieldRouters = "routers"
+	configPath       = "/config"
 	pemTypeCert      = "CERTIFICATE"
 	pemTypeECKey     = "EC PRIVATE KEY"
 )
@@ -71,7 +72,7 @@ const (
 func testConfig(apiURL, trafficURL string) config.Config {
 	return config.Config{
 		Listen:          ":0",
-		ConfigPath:      "/config",
+		ConfigPath:      configPath,
 		PollInterval:    30 * time.Second,
 		RequestTimeout:  5 * time.Second,
 		MaxResponseSize: 10 * 1024 * 1024,
@@ -92,7 +93,7 @@ func testConfig(apiURL, trafficURL string) config.Config {
 // EdgeEntrypoints are ["websecure"]; all other timing/size fields are test defaults.
 func multiConfig(downstreams []config.Downstream) config.Config {
 	return config.Config{
-		ConfigPath:      "/config",
+		ConfigPath:      configPath,
 		RequestTimeout:  5 * time.Second,
 		MaxResponseSize: 10 * 1024 * 1024,
 		EdgeEntrypoints: []string{valueWebsecure},
@@ -670,7 +671,7 @@ func TestRefresh_FailingDownstream_HealthyDownstreamsStillServed(t *testing.T) {
 		{Name: "live", APIAddress: live.URL, TrafficAddress: "http://live:80", AllowedEntrypoints: []string{valueWeb}},
 	})
 
-	a, err := app.New(cfg)
+	a, err := app.New(cfg, app.WithSleep(func(time.Duration) {}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -691,7 +692,10 @@ func TestRefresh_FailingDownstream_LastGoodRoutesRetained(t *testing.T) {
 	// primary: healthy in cycle 1, returns 500 in cycle 2.
 	primary := sequencedDownstream(t, []map[string]any{
 		{valueAppA: map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: valueHostA, fieldStatus: valueEnabled, fieldProvider: valueDocker}},
-		nil, // cycle 2: 500
+		nil, // cycle 2+: 500 (three extra entries so the in-call retries of
+		nil, // cycle 2 also fail instead of wrapping back to the good payload)
+		nil,
+		nil,
 	})
 	// gpu: healthy in both cycles.
 	gpu := sequencedDownstream(t, []map[string]any{
@@ -704,7 +708,7 @@ func TestRefresh_FailingDownstream_LastGoodRoutesRetained(t *testing.T) {
 		{Name: valueGpu, APIAddress: gpu.URL, TrafficAddress: valueTrafficGpu, AllowedEntrypoints: []string{valueWeb}},
 	})
 
-	a, err := app.New(cfg)
+	a, err := app.New(cfg, app.WithSleep(func(time.Duration) {}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -730,11 +734,17 @@ func TestRefresh_FailingDownstream_LastGoodRoutesRetained(t *testing.T) {
 func TestRefresh_AllDownstreamsFail_LastGoodRoutesRetained(t *testing.T) {
 	primary := sequencedDownstream(t, []map[string]any{
 		{valueAppA: map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: valueHostA, fieldStatus: valueEnabled, fieldProvider: valueDocker}},
-		nil, // cycle 2: 500
+		nil, // cycle 2+: 500 (three extra entries so the in-call retries of
+		nil, // cycle 2 also fail instead of wrapping back to the good payload)
+		nil,
+		nil,
 	})
 	gpu := sequencedDownstream(t, []map[string]any{
 		{valueAppB: map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: valueHostB, fieldStatus: valueEnabled, fieldProvider: valueDocker}},
-		nil, // cycle 2: 500
+		nil, // cycle 2+: 500 (three extra entries so the in-call retries of
+		nil, // cycle 2 also fail instead of wrapping back to the good payload)
+		nil,
+		nil,
 	})
 
 	cfg := multiConfig([]config.Downstream{
@@ -742,7 +752,7 @@ func TestRefresh_AllDownstreamsFail_LastGoodRoutesRetained(t *testing.T) {
 		{Name: valueGpu, APIAddress: gpu.URL, TrafficAddress: valueTrafficGpu, AllowedEntrypoints: []string{valueWeb}},
 	})
 
-	a, err := app.New(cfg)
+	a, err := app.New(cfg, app.WithSleep(func(time.Duration) {}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1033,4 +1043,193 @@ func TestRefresh_ClientCert_PresentedDuringTLS(t *testing.T) {
 	cfg := testConfig(ds.URL, valueTrafficExample)
 	cfg.Downstreams[0].TLS = &config.TLS{CA: writePEMFile(t, ca.certPEM), Cert: certPath, Key: keyPath}
 	refreshWith(t, cfg)
+}
+
+// ---- Issue #6: failure-path isolation ---------------------------------------
+
+// Issue #6: a downstream returning malformed JSON must not crash Refresh nor
+// corrupt another downstream's output; its own last-known-good routes are
+// retained for that cycle.
+func TestRefresh_MalformedJSON_LastGoodRetained(t *testing.T) {
+	// bad: healthy routers in cycle 1, malformed JSON in cycle 2.
+	var n atomic.Int32
+	badResponses := [][]byte{
+		mustJSON(t, map[string]any{jsonFieldRouters: map[string]any{
+			valueAppA: map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: valueHostA, fieldStatus: valueEnabled, fieldProvider: valueDocker},
+		}}),
+		[]byte(`{"routers": {oops`), // malformed JSON
+	}
+	bad := httptest.NewServer(rawdataHandler(func(w http.ResponseWriter, r *http.Request) {
+		i := min(int(n.Add(1)-1), len(badResponses)-1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(badResponses[i])
+	}))
+	defer bad.Close()
+
+	live := fakeDownstream(map[string]any{
+		valueAppB: map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: valueHostB, fieldStatus: valueEnabled, fieldProvider: valueDocker},
+	})
+	defer live.Close()
+
+	cfg := multiConfig([]config.Downstream{
+		{Name: valuePrimary, APIAddress: bad.URL, TrafficAddress: valueTrafficPrimary, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valueGpu, APIAddress: live.URL, TrafficAddress: valueTrafficGpu, AllowedEntrypoints: []string{valueWeb}},
+	})
+
+	a, err := app.New(cfg, app.WithSleep(func(time.Duration) {}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Refresh(context.Background()); err != nil {
+		t.Fatalf("cycle 1 Refresh: %v", err)
+	}
+	if err := a.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh must survive malformed JSON: %v", err)
+	}
+
+	env := queryHandler(t, a.Handler(), cfg.ConfigPath)
+	if _, ok := env.HTTP.Routers[valuePrimaryAppA]; !ok {
+		t.Error("malformed-JSON downstream's last-good routes must be retained")
+	}
+	if _, ok := env.HTTP.Routers[valueGpuAppB]; !ok {
+		t.Error("healthy downstream's routes must be unaffected by another's malformed JSON")
+	}
+}
+
+// Issue #6: a downstream whose response exceeds MaxResponseSize must not crash
+// Refresh nor corrupt another downstream's output; its last-known-good routes
+// are retained.
+func TestRefresh_OversizedResponse_LastGoodRetained(t *testing.T) {
+	// Cycle 1: valid routers.  Cycle 2: a JSON body far larger than the
+	// configured MaxResponseSize, so the LimitReader truncates it mid-object
+	// and decoding fails.
+	var n atomic.Int32
+	responses := [][]byte{
+		mustJSON(t, map[string]any{jsonFieldRouters: map[string]any{
+			valueAppA: map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: valueHostA, fieldStatus: valueEnabled, fieldProvider: valueDocker},
+		}}),
+		[]byte(`{"routers": {"` + strings.Repeat("x", 8192) + `@docker": {`),
+	}
+
+	srv := httptest.NewServer(rawdataHandler(func(w http.ResponseWriter, r *http.Request) {
+		i := min(int(n.Add(1)-1), len(responses)-1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(responses[i])
+	}))
+	defer srv.Close()
+
+	live := fakeDownstream(map[string]any{
+		valueAppB: map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: valueHostB, fieldStatus: valueEnabled, fieldProvider: valueDocker},
+	})
+	defer live.Close()
+
+	cfg := multiConfig([]config.Downstream{
+		{Name: valuePrimary, APIAddress: srv.URL, TrafficAddress: valueTrafficPrimary, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valueGpu, APIAddress: live.URL, TrafficAddress: valueTrafficGpu, AllowedEntrypoints: []string{valueWeb}},
+	})
+	// Small enough to truncate the cycle-2 body mid-object, large enough for cycle 1.
+	cfg.MaxResponseSize = 1024
+
+	a, err := app.New(cfg, app.WithSleep(func(time.Duration) {}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Refresh(context.Background()); err != nil {
+		t.Fatalf("cycle 1 Refresh: %v", err)
+	}
+	if err := a.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh must survive an oversized response: %v", err)
+	}
+
+	env := queryHandler(t, a.Handler(), cfg.ConfigPath)
+	if _, ok := env.HTTP.Routers[valuePrimaryAppA]; !ok {
+		t.Error("oversized-response downstream's last-good routes must be retained")
+	}
+	if _, ok := env.HTTP.Routers[valueGpuAppB]; !ok {
+		t.Error("healthy downstream's routes must be unaffected by another's oversized response")
+	}
+}
+
+// Issue #6: a downstream that becomes unreachable after having been healthy
+// keeps serving its last successful snapshot.
+func TestRefresh_DownstreamUnreachableMidRun_LastGoodRetained(t *testing.T) {
+	ds := fakeDownstream(map[string]any{
+		valueAppA: map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: valueHostA, fieldStatus: valueEnabled, fieldProvider: valueDocker},
+	})
+
+	cfg := testConfig(ds.URL, valueTrafficExample)
+	a, err := app.New(cfg, app.WithSleep(func(time.Duration) {}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Refresh(context.Background()); err != nil {
+		t.Fatalf("cycle 1 Refresh: %v", err)
+	}
+
+	// The downstream goes away mid-run.
+	ds.Close()
+
+	if err := a.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh must not fail when the downstream is unreachable: %v", err)
+	}
+
+	env := queryHandler(t, a.Handler(), cfg.ConfigPath)
+	if _, ok := env.HTTP.Routers[valuePrimaryAppA]; !ok {
+		t.Errorf("last-good routes must be served after the downstream disappears; got %v", routerKeys(env))
+	}
+}
+
+// Issue #6: HTTP 200 with zero routers is a valid empty result. The
+// downstream's snapshot is replaced with an empty one (its routes disappear)
+// without being logged or counted as a failure.
+func TestRefresh_ZeroRouters_ValidEmptyResult(t *testing.T) {
+	primary := sequencedDownstream(t, []map[string]any{
+		{valueAppA: map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: valueHostA, fieldStatus: valueEnabled, fieldProvider: valueDocker}},
+		{}, // cycle 2: 200 with zero routers
+	})
+	live := fakeDownstream(map[string]any{
+		valueAppB: map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: valueHostB, fieldStatus: valueEnabled, fieldProvider: valueDocker},
+	})
+	defer live.Close()
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	cfg := multiConfig([]config.Downstream{
+		{Name: valuePrimary, APIAddress: primary.URL, TrafficAddress: valueTrafficPrimary, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valueGpu, APIAddress: live.URL, TrafficAddress: valueTrafficGpu, AllowedEntrypoints: []string{valueWeb}},
+	})
+
+	a, err := app.New(cfg, app.WithLogger(logger))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Refresh(context.Background()); err != nil {
+		t.Fatalf("cycle 1 Refresh: %v", err)
+	}
+	if err := a.Refresh(context.Background()); err != nil {
+		t.Fatalf("cycle 2 Refresh: %v", err)
+	}
+
+	if logOut := logBuf.String(); logOut != "" {
+		t.Errorf("zero-router result must not be logged as a failure; log:\n%s", logOut)
+	}
+
+	env := queryHandler(t, a.Handler(), cfg.ConfigPath)
+	if _, ok := env.HTTP.Routers[valuePrimaryAppA]; ok {
+		t.Error("zero-router result must replace the downstream's snapshot with an empty one")
+	}
+	if _, ok := env.HTTP.Routers[valueGpuAppB]; !ok {
+		t.Error("healthy downstream's routes must be unaffected")
+	}
+}
+
+// mustJSON marshals v and fails the test on error.
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return b
 }
