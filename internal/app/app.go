@@ -201,10 +201,10 @@ func (a *App) fetchRawData(ctx context.Context, ds config.Downstream) (*rawdataR
 	}
 
 	if ds.Auth != nil {
-		switch {
-		case ds.Auth.Token != "":
-			req.Header.Set("Authorization", "Bearer "+ds.Auth.Token)
-		case ds.Auth.Username != "" || ds.Auth.Password != "":
+		for k, v := range ds.Auth.Headers {
+			req.Header.Set(k, v)
+		}
+		if ds.Auth.Username != "" {
 			req.SetBasicAuth(ds.Auth.Username, ds.Auth.Password)
 		}
 	}

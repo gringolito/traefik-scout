@@ -923,8 +923,8 @@ func refreshWith(t *testing.T, cfg config.Config) {
 
 // ---- Issue #5, Cycle 1 ------------------------------------------------------
 
-// A downstream configured with a bearer token must send that exact
-// Authorization header on every poll request.
+// A downstream configured with a static Authorization header sends that exact
+// header on every poll request, covering the bearer-token pattern.
 func TestRefresh_BearerToken_SendsAuthorizationHeader(t *testing.T) {
 	const token = "my-secret-bearer-token"
 	ds := requestCheckingDownstream(t, func(t *testing.T, r *http.Request) {
@@ -936,7 +936,26 @@ func TestRefresh_BearerToken_SendsAuthorizationHeader(t *testing.T) {
 		}
 	})
 	cfg := testConfig(ds.URL, valueTrafficExample)
-	cfg.Downstreams[0].Auth = &config.Auth{Token: token}
+	cfg.Downstreams[0].Auth = &config.Auth{Headers: map[string]string{"Authorization": "Bearer " + token}}
+	refreshWith(t, cfg)
+}
+
+// A downstream configured with a non-standard header (e.g. an API key) sends
+// that header on every poll request.
+func TestRefresh_APIKeyHeader_SendsCustomHeader(t *testing.T) {
+	const (
+		headerName = "X-Api-Key"
+		headerVal  = "my-api-key"
+	)
+	ds := requestCheckingDownstream(t, func(t *testing.T, r *http.Request) {
+		t.Helper()
+		got := r.Header.Get(headerName)
+		if got != headerVal {
+			t.Errorf("%s = %q, want %q", headerName, got, headerVal)
+		}
+	})
+	cfg := testConfig(ds.URL, valueTrafficExample)
+	cfg.Downstreams[0].Auth = &config.Auth{Headers: map[string]string{headerName: headerVal}}
 	refreshWith(t, cfg)
 }
 
