@@ -59,16 +59,16 @@ func WithLogger(l *slog.Logger) Option {
 	return func(a *App) { a.log = l }
 }
 
-// withClock overrides the App's time source.  It is unexported on purpose:
-// only tests inject a clock; production always uses time.Now.
-func withClock(now func() time.Time) Option {
+// WithClock overrides the App's time source, defaulting to time.Now.
+// Intended for injecting a deterministic clock in tests.
+func WithClock(now func() time.Time) Option {
 	return func(a *App) { a.now = now }
 }
 
-// withSleep overrides the delay mechanism between fetch-retry attempts.  It
-// is unexported on purpose: only tests inject a sleep; production always
-// uses time.Sleep.
-func withSleep(sleep func(time.Duration)) Option {
+// WithSleep overrides the delay mechanism used between fetch-retry attempts,
+// defaulting to time.Sleep. Intended for injecting a fast, deterministic
+// sleep in tests.
+func WithSleep(sleep func(time.Duration)) Option {
 	return func(a *App) { a.sleep = sleep }
 }
 

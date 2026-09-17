@@ -16,9 +16,8 @@ import (
 	"github.com/gringolito/traefik-scout/internal/config"
 )
 
-// Issue #6 tests that need to control the passage of time inject a fake clock
-// through the WithClock test hook exported from export_test.go, and stay in
-// the external test package so fixture constants are shared with app_test.go.
+// Issue #6 tests that need to control the passage of time inject a fake
+// clock via the public app.WithClock option.
 
 // fakeClock is a manually-advanced clock for deterministic staleness tests.
 type fakeClock struct {
