@@ -30,14 +30,8 @@ type snapshot struct {
 	etag string
 }
 
-// Fetch-retry timing for a failing downstream, applied entirely within a
-// single Refresh cycle so resilience does not depend on any external poll
-// cadence.  A failing downstream is attempted fetchRetryMaxAttempts times,
-// sleeping fetchRetryBaseDelay (doubled per attempt, capped at
-// fetchRetryMaxDelay) between attempts.  500ms doubling to 2s rides out
-// brief blips (connection resets, one bad response) while bounding the
-// worst-case added latency for a permanently-dead downstream at about 1.5s
-// per cycle, small enough to sit inside a normal poll budget.
+// fetchRetryMaxAttempts bounds in-cycle retries for a failing downstream;
+// fetchRetryBaseDelay doubles per attempt up to fetchRetryMaxDelay.
 const (
 	fetchRetryMaxAttempts = 3
 	fetchRetryBaseDelay   = 500 * time.Millisecond
@@ -182,44 +176,25 @@ func newMergeResult() *mergeResult {
 	}
 }
 
-// Refresh polls every downstream, falls back to last-known-good data on
-// failure, and atomically replaces the snapshot that Handler serves.
+// Refresh polls every downstream, merges their routes, and atomically
+// replaces the snapshot Handler serves.
 //
-// A downstream that fails to respond is logged at WARN; its most recent
-// successful response is used instead so its routes remain in the merged
-// output.  Only when a downstream has never responded successfully does it
-// contribute nothing for that cycle.  If no downstream contributes any data
-// (all failed, none have prior data), the existing snapshot is kept rather
-// than replacing it with an empty configuration.
+// A downstream that fails is retried up to fetchRetryMaxAttempts times with
+// capped exponential backoff, then falls back to its last-known-good data,
+// or nothing if it has never succeeded. HTTP 200 with zero routers is a
+// valid empty result, not a failure.
 //
-// Failed polls are retried within the same cycle: each downstream is
-// attempted up to fetchRetryMaxAttempts times, with a capped exponential
-// delay (fetchRetryBaseDelay doubling per attempt, capped at
-// fetchRetryMaxDelay) between attempts, before falling back to
-// last-known-good data (or contributing nothing, if the downstream has
-// never succeeded).
+// An optional per-downstream StalenessLimit withdraws a downstream's routes
+// once its last successful poll is older than the limit, and reinstates them
+// on the next success without a restart. If nothing was contributed or
+// withdrawn, the existing snapshot is kept.
 //
-// A downstream may also configure a staleness limit (zero, the default, means
-// unlimited).  When the time since that downstream's last successful poll
-// exceeds the limit, its routes are withdrawn from the merged output instead
-// of being served from last-known-good data.  The check uses the
-// last-success timestamp, which is only advanced by successful polls.  A
-// withdrawn downstream's routes reappear on its next successful poll
-// without a restart.
-//
-// A downstream that responds HTTP 200 with zero routers is a valid empty
-// result: its snapshot is replaced with an empty one and its routes drop out
-// of the merged output, without being treated as a failure.
-//
-// After merging, identical routing rules contributed by different downstreams
-// are logged at WARN naming both contributors; the configuration is still
-// served so Traefik can resolve the conflict by priority.
+// Duplicate routing rules across downstreams are logged at WARN but still
+// served, letting Traefik resolve the conflict by priority.
 func (a *App) Refresh(ctx context.Context) error {
 	result := newMergeResult()
 	contributed := false
-	// withdrew records that a staleness limit removed previously-served data
-	// this cycle: the snapshot must be republished (possibly empty) even when
-	// no downstream contributed, so withdrawal takes effect.
+	// withdrew forces a republish when staleness removed the only contributor.
 	withdrew := false
 
 	for _, ds := range a.cfg.Downstreams {
@@ -245,16 +220,10 @@ func (a *App) Refresh(ctx context.Context) error {
 			raw = r
 		}
 
-		// Enforce the optional per-downstream staleness limit: if no poll has
-		// succeeded within the limit, withdraw this downstream's routes for
-		// this cycle instead of serving last-known-good data indefinitely.
-		// The check uses the last-success timestamp, which is only advanced
-		// by successful polls.
+		// Withdraw routes once the last successful poll is older than the limit.
 		if raw != nil && ds.StalenessLimit > 0 {
 			if st.lastSuccess.IsZero() || a.now().Sub(st.lastSuccess) > ds.StalenessLimit {
-				// Warn only on the transition into withdrawal; while the
-				// downstream stays stale it is logged once, not once per
-				// cycle.
+				// Log once on the transition into withdrawal, not every cycle.
 				if !st.stale {
 					st.stale = true
 					a.log.WarnContext(ctx, "downstream stale, withdrawing routes",
@@ -274,9 +243,7 @@ func (a *App) Refresh(ctx context.Context) error {
 		a.mergeDownstream(ds, raw, result)
 	}
 
-	// Nothing to merge: all downstreams failed and none have prior data, and
-	// no staleness withdrawal occurred.  Retain the existing snapshot instead
-	// of overwriting it with empty output.
+	// Nothing changed: keep the existing snapshot instead of clearing it.
 	if !contributed && !withdrew {
 		return nil
 	}
@@ -303,12 +270,9 @@ func (a *App) Refresh(ctx context.Context) error {
 	return nil
 }
 
-// fetchWithRetry calls fetchRawData up to fetchRetryMaxAttempts times for
-// one downstream, sleeping for a capped exponential delay between attempts.
-// On success the response is returned immediately; when every attempt fails,
-// the last error is returned.  A cancelled or expired context is checked
-// before each sleep so it is never blocked by a retry; on that path the
-// context error is returned.
+// fetchWithRetry retries fetchRawData up to fetchRetryMaxAttempts times with
+// capped exponential backoff, returning early on success or context
+// cancellation.
 func (a *App) fetchWithRetry(ctx context.Context, ds config.Downstream) (*rawdataResponse, error) {
 	var (
 		raw *rawdataResponse
