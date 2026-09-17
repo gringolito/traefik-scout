@@ -100,20 +100,35 @@ func multiConfig(downstreams []config.Downstream) config.Config {
 	}
 }
 
-// fakeDownstream starts an httptest.Server that serves the given routers at
-// GET /api/rawdata in Traefik rawdata format.
-func fakeDownstream(routers map[string]any) *httptest.Server {
-	body, err := json.Marshal(map[string]any{jsonFieldRouters: routers})
-	if err != nil {
-		panic("fakeDownstream: json.Marshal: " + err.Error())
-	}
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// rawdataHandler wraps fn so that only requests for rawdataPath reach it;
+// every other path gets a 404.  All five fake-downstream helpers use this
+// to avoid copy-pasting the routing guard.
+func rawdataHandler(fn http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != rawdataPath {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(body)
+		fn(w, r)
+	}
+}
+
+// serveRawdata encodes routers as a rawdata JSON response body.
+func serveRawdata(w http.ResponseWriter, routers map[string]any) {
+	body, err := json.Marshal(map[string]any{jsonFieldRouters: routers})
+	if err != nil {
+		http.Error(w, "marshal error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(body)
+}
+
+// fakeDownstream starts an httptest.Server that serves the given routers at
+// GET /api/rawdata in Traefik rawdata format.
+func fakeDownstream(routers map[string]any) *httptest.Server {
+	return httptest.NewServer(rawdataHandler(func(w http.ResponseWriter, r *http.Request) {
+		serveRawdata(w, routers)
 	}))
 }
 
@@ -122,24 +137,14 @@ func fakeDownstream(routers map[string]any) *httptest.Server {
 func sequencedDownstream(t *testing.T, responses []map[string]any) *httptest.Server {
 	t.Helper()
 	var n atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != rawdataPath {
-			http.NotFound(w, r)
-			return
-		}
+	srv := httptest.NewServer(rawdataHandler(func(w http.ResponseWriter, r *http.Request) {
 		i := int(n.Add(1)-1) % len(responses)
 		routers := responses[i]
 		if routers == nil {
 			http.Error(w, "upstream error", http.StatusInternalServerError)
 			return
 		}
-		body, err := json.Marshal(map[string]any{jsonFieldRouters: routers})
-		if err != nil {
-			http.Error(w, "marshal error", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(body)
+		serveRawdata(w, routers)
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -877,31 +882,20 @@ func writePEMFile(t *testing.T, content []byte) string {
 // every /api/rawdata request before serving an empty rawdata JSON response.
 func requestCheckingDownstream(t *testing.T, checkFn func(t *testing.T, r *http.Request)) *httptest.Server {
 	t.Helper()
-	body, _ := json.Marshal(map[string]any{jsonFieldRouters: map[string]any{}})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != rawdataPath {
-			http.NotFound(w, r)
-			return
-		}
+	srv := httptest.NewServer(rawdataHandler(func(w http.ResponseWriter, r *http.Request) {
 		checkFn(t, r)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(body)
+		serveRawdata(w, map[string]any{})
 	}))
 	t.Cleanup(srv.Close)
 	return srv
 }
 
-// tlsDownstreamWith starts an HTTPS fake downstream using the given TLS config.
+// tlsDownstreamWith starts an HTTPS fake downstream using tlsCfg.  Pass
+// &tls.Config{} to get httptest's built-in self-signed certificate.
 func tlsDownstreamWith(t *testing.T, tlsCfg *tls.Config) *httptest.Server {
 	t.Helper()
-	body, _ := json.Marshal(map[string]any{jsonFieldRouters: map[string]any{}})
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != rawdataPath {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(body)
+	srv := httptest.NewUnstartedServer(rawdataHandler(func(w http.ResponseWriter, r *http.Request) {
+		serveRawdata(w, map[string]any{})
 	}))
 	srv.TLS = tlsCfg
 	srv.StartTLS()
@@ -1006,19 +1000,9 @@ func TestRefresh_CustomCA_PollsHTTPSServer(t *testing.T) {
 // server presenting a self-signed certificate that the system trust store does
 // not recognise.
 func TestRefresh_InsecureSkipVerify_PollsSelfSignedServer(t *testing.T) {
-	// httptest.NewTLSServer uses a built-in self-signed cert not in any system
-	// trust store; a plain client would reject it.
-	ds := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != rawdataPath {
-			http.NotFound(w, r)
-			return
-		}
-		body, _ := json.Marshal(map[string]any{jsonFieldRouters: map[string]any{}})
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(body)
-	}))
-	t.Cleanup(ds.Close)
-
+	// Empty TLS config → tlsDownstreamWith uses httptest's built-in self-signed
+	// cert, which no system trust store recognises.
+	ds := tlsDownstreamWith(t, &tls.Config{})
 	cfg := testConfig(ds.URL, valueTrafficExample)
 	cfg.Downstreams[0].TLS = &config.TLS{InsecureSkipVerify: true}
 	refreshWith(t, cfg)

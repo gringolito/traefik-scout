@@ -201,6 +201,9 @@ func validate(cfg *Config) error {
 			if (d.Auth.Username == "") != (d.Auth.Password == "") {
 				return fmt.Errorf("downstream[%d] (%q): auth.username and auth.password must both be set together", i, d.Name)
 			}
+			if len(d.Auth.Headers) > 0 && d.Auth.Username != "" {
+				return fmt.Errorf("downstream[%d] (%q): auth.headers and auth.username/password are mutually exclusive", i, d.Name)
+			}
 		}
 		if d.TLS != nil {
 			if (d.TLS.Cert == "") != (d.TLS.Key == "") {

@@ -10,8 +10,6 @@ downstreams:
     auth:
       username: admin
       password: secret
-      headers:
-        X-Traefik-Token: test-token
     tls:
       ca: /etc/ssl/ca.crt
       insecure_skip_verify: false

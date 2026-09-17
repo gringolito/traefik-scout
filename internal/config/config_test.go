@@ -173,9 +173,6 @@ func TestLoad_DownstreamOptionalFields(t *testing.T) {
 	if d.Auth.Username != "admin" {
 		t.Errorf("auth.username: got %q, want %q", d.Auth.Username, "admin")
 	}
-	if d.Auth.Headers["X-Traefik-Token"] != "test-token" {
-		t.Errorf("auth.headers[X-Traefik-Token]: got %q, want %q", d.Auth.Headers["X-Traefik-Token"], "test-token")
-	}
 	if d.TLS == nil {
 		t.Fatal("tls must be populated")
 	}
@@ -315,5 +312,27 @@ downstreams:
 	}
 	if !containsField(err, "cert") && !containsField(err, "key") {
 		t.Errorf("error must name cert or key, got: %v", err)
+	}
+}
+
+// auth.headers and auth.username/password cannot both be set.
+func TestLoad_AuthHeadersAndBasicAuth_ReturnsError(t *testing.T) {
+	path := writeYAML(t, `
+downstreams:
+  - name: primary
+    api_address: http://traefik:8080
+    traffic_address: http://traefik:80
+    auth:
+      headers:
+        X-Api-Key: mykey
+      username: alice
+      password: secret
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for headers combined with username/password, got nil")
+	}
+	if !containsField(err, "headers") && !containsField(err, "username") {
+		t.Errorf("error must name headers or username, got: %v", err)
 	}
 }

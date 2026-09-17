@@ -107,9 +107,11 @@ func buildClient(ds config.Downstream, timeout time.Duration) (*http.Client, err
 		tlsCfg.Certificates = []tls.Certificate{cert}
 	}
 
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = tlsCfg
 	return &http.Client{
 		Timeout:   timeout,
-		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+		Transport: transport,
 	}, nil
 }
 
