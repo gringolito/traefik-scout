@@ -30,44 +30,30 @@ type snapshot struct {
 	etag string
 }
 
-// Backoff timing for a failing downstream.  The window starts at
-// backoffBaseDelay and doubles with each consecutive failure up to
-// backoffMaxDelay, so a dead downstream is re-polled roughly every few
-// minutes instead of every cycle, while a freshly-failing one recovers
-// quickly.  5 minutes bounds the worst-case staleness introduced by backing
-// off to well under any operationally meaningful outage window.
+// Fetch-retry timing for a failing downstream, applied entirely within a
+// single Refresh cycle so resilience does not depend on any external poll
+// cadence.  A failing downstream is attempted fetchRetryMaxAttempts times,
+// sleeping fetchRetryBaseDelay (doubled per attempt, capped at
+// fetchRetryMaxDelay) between attempts.  500ms doubling to 2s rides out
+// brief blips (connection resets, one bad response) while bounding the
+// worst-case added latency for a permanently-dead downstream at about 1.5s
+// per cycle, small enough to sit inside a normal poll budget.
 const (
-	backoffBaseDelay = 1 * time.Second
-	backoffMaxDelay  = 5 * time.Minute
+	fetchRetryMaxAttempts = 3
+	fetchRetryBaseDelay   = 500 * time.Millisecond
+	fetchRetryMaxDelay    = 2 * time.Second
 )
 
-// backoffDelay returns the retry window following the nth consecutive
-// failure, doubling from backoffBaseDelay and capped at backoffMaxDelay.
-func backoffDelay(failures int) time.Duration {
-	// Cap the shift first so failures can never overflow the duration.
-	const maxShift = 62
-	if failures < 1 {
-		failures = 1
-	}
-	shift := failures - 1
-	shift = min(shift, maxShift)
-	d := backoffBaseDelay << uint(shift)
-	if d < backoffBaseDelay || d > backoffMaxDelay {
-		return backoffMaxDelay
-	}
-	return d
-}
-
-// pollState tracks one downstream's retry bookkeeping across Refresh cycles.
+// pollState tracks one downstream's staleness bookkeeping across Refresh
+// cycles.
 type pollState struct {
 	// lastSuccess is the time of the most recent successful poll; zero when
 	// the downstream has never succeeded.
 	lastSuccess time.Time
-	// failures counts consecutive failed polls since the last success.
-	failures int
-	// notBefore is the earliest time the next poll may be attempted; zero
-	// when the downstream is due immediately.
-	notBefore time.Time
+	// stale records whether the downstream is currently withdrawn for
+	// staleness, so the withdrawal WARN fires only on the transition into
+	// withdrawal instead of on every subsequent cycle.
+	stale bool
 }
 
 // Option configures an App at construction time.
@@ -85,6 +71,13 @@ func withClock(now func() time.Time) Option {
 	return func(a *App) { a.now = now }
 }
 
+// withSleep overrides the delay mechanism between fetch-retry attempts.  It
+// is unexported on purpose: only tests inject a sleep; production always
+// uses time.Sleep.
+func withSleep(sleep func(time.Duration)) Option {
+	return func(a *App) { a.sleep = sleep }
+}
+
 // App polls downstream Traefik instances and serves their merged route
 // configuration as a single Traefik file-provider JSON document.
 type App struct {
@@ -99,8 +92,11 @@ type App struct {
 	// single-caller constraint as lastGood.
 	state map[string]*pollState
 	// now is the time source, injectable for deterministic tests.
-	now  func() time.Time
-	snap atomic.Pointer[snapshot]
+	now func() time.Time
+	// sleep pauses between fetch-retry attempts, injectable for
+	// deterministic tests.
+	sleep func(time.Duration)
+	snap  atomic.Pointer[snapshot]
 }
 
 // New returns a ready App configured from cfg.  Config is already validated by
@@ -122,6 +118,7 @@ func New(cfg config.Config, opts ...Option) (*App, error) {
 		lastGood: make(map[string]*rawdataResponse),
 		state:    make(map[string]*pollState),
 		now:      time.Now,
+		sleep:    time.Sleep,
 	}
 	for _, o := range opts {
 		o(a)
@@ -195,20 +192,20 @@ func newMergeResult() *mergeResult {
 // (all failed, none have prior data), the existing snapshot is kept rather
 // than replacing it with an empty configuration.
 //
-// Failed polls are retried with capped exponential backoff: each consecutive
-// failure defers the downstream's next poll by a window that starts at
-// backoffBaseDelay, doubles per consecutive failure, and is capped at
-// backoffMaxDelay.  While the window is open, Refresh skips the network for
-// that downstream entirely and serves its last-known-good data; a success
-// resets the window and the failure count.
+// Failed polls are retried within the same cycle: each downstream is
+// attempted up to fetchRetryMaxAttempts times, with a capped exponential
+// delay (fetchRetryBaseDelay doubling per attempt, capped at
+// fetchRetryMaxDelay) between attempts, before falling back to
+// last-known-good data (or contributing nothing, if the downstream has
+// never succeeded).
 //
 // A downstream may also configure a staleness limit (zero, the default, means
 // unlimited).  When the time since that downstream's last successful poll
 // exceeds the limit, its routes are withdrawn from the merged output instead
-// of being served from last-known-good data.  The check runs even for cycles
-// deferred by backoff, and uses the last-success timestamp. Deferred cycles
-// never count as success.  A withdrawn downstream's routes reappear on its
-// next successful poll without a restart.
+// of being served from last-known-good data.  The check uses the
+// last-success timestamp, which is only advanced by successful polls.  A
+// withdrawn downstream's routes reappear on its next successful poll
+// without a restart.
 //
 // A downstream that responds HTTP 200 with zero routers is a valid empty
 // result: its snapshot is replaced with an empty one and its routes drop out
@@ -233,22 +230,16 @@ func (a *App) Refresh(ctx context.Context) error {
 		}
 
 		var raw *rawdataResponse
-		if a.now().Before(st.notBefore) {
-			// Inside the retry window from a previous failure: skip the
-			// network entirely and fall back to last-known-good below.
-			a.log.DebugContext(ctx, "poll deferred by backoff",
-				"downstream", ds.Name, "not_before", st.notBefore)
-			raw = a.lastGood[ds.Name]
-		} else if r, err := a.fetchRawData(ctx, ds); err != nil {
-			st.failures++
-			delay := backoffDelay(st.failures)
-			st.notBefore = a.now().Add(delay)
+		if r, err := a.fetchWithRetry(ctx, ds); err != nil {
 			a.log.WarnContext(ctx, "poll failed, using last-known-good",
-				"downstream", ds.Name, "error", err, "retry_in", delay)
+				"downstream", ds.Name, "error", err, "attempts", fetchRetryMaxAttempts)
 			raw = a.lastGood[ds.Name] // nil when this downstream has never succeeded
 		} else {
-			st.failures = 0
-			st.notBefore = time.Time{}
+			if st.stale {
+				st.stale = false
+				a.log.InfoContext(ctx, "stale downstream recovered, reinstating routes",
+					"downstream", ds.Name)
+			}
 			st.lastSuccess = a.now()
 			a.lastGood[ds.Name] = r // store even when zero routers (valid empty result)
 			raw = r
@@ -257,15 +248,20 @@ func (a *App) Refresh(ctx context.Context) error {
 		// Enforce the optional per-downstream staleness limit: if no poll has
 		// succeeded within the limit, withdraw this downstream's routes for
 		// this cycle instead of serving last-known-good data indefinitely.
-		// This applies to fallbacks from failures AND to cycles deferred by
-		// backoff, and uses the last-success timestamp (never refreshed by
-		// either).
+		// The check uses the last-success timestamp, which is only advanced
+		// by successful polls.
 		if raw != nil && ds.StalenessLimit > 0 {
 			if st.lastSuccess.IsZero() || a.now().Sub(st.lastSuccess) > ds.StalenessLimit {
-				a.log.WarnContext(ctx, "downstream stale, withdrawing routes",
-					"downstream", ds.Name,
-					"last_success", st.lastSuccess,
-					"staleness_limit", ds.StalenessLimit)
+				// Warn only on the transition into withdrawal; while the
+				// downstream stays stale it is logged once, not once per
+				// cycle.
+				if !st.stale {
+					st.stale = true
+					a.log.WarnContext(ctx, "downstream stale, withdrawing routes",
+						"downstream", ds.Name,
+						"last_success", st.lastSuccess,
+						"staleness_limit", ds.StalenessLimit)
+				}
 				raw = nil
 				withdrew = true
 			}
@@ -305,6 +301,35 @@ func (a *App) Refresh(ctx context.Context) error {
 		etag: fmt.Sprintf(`"%x"`, sum[:8]),
 	})
 	return nil
+}
+
+// fetchWithRetry calls fetchRawData up to fetchRetryMaxAttempts times for
+// one downstream, sleeping for a capped exponential delay between attempts.
+// On success the response is returned immediately; when every attempt fails,
+// the last error is returned.  A cancelled or expired context is checked
+// before each sleep so it is never blocked by a retry; on that path the
+// context error is returned.
+func (a *App) fetchWithRetry(ctx context.Context, ds config.Downstream) (*rawdataResponse, error) {
+	var (
+		raw *rawdataResponse
+		err error
+	)
+	for attempt := 1; attempt <= fetchRetryMaxAttempts; attempt++ {
+		if raw, err = a.fetchRawData(ctx, ds); err == nil {
+			return raw, nil
+		}
+		if attempt == fetchRetryMaxAttempts {
+			break
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		delay := min(fetchRetryBaseDelay<<uint(attempt-1), fetchRetryMaxDelay)
+		a.log.DebugContext(ctx, "retrying downstream poll",
+			"downstream", ds.Name, "attempt", attempt+1, "delay", delay, "error", err)
+		a.sleep(delay)
+	}
+	return nil, err
 }
 
 // fetchRawData fetches and decodes one downstream's /api/rawdata.

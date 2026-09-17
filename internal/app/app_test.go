@@ -62,6 +62,7 @@ const (
 const (
 	rawdataPath      = "/api/rawdata"
 	jsonFieldRouters = "routers"
+	configPath       = "/config"
 	pemTypeCert      = "CERTIFICATE"
 	pemTypeECKey     = "EC PRIVATE KEY"
 )
@@ -71,7 +72,7 @@ const (
 func testConfig(apiURL, trafficURL string) config.Config {
 	return config.Config{
 		Listen:          ":0",
-		ConfigPath:      "/config",
+		ConfigPath:      configPath,
 		PollInterval:    30 * time.Second,
 		RequestTimeout:  5 * time.Second,
 		MaxResponseSize: 10 * 1024 * 1024,
@@ -92,7 +93,7 @@ func testConfig(apiURL, trafficURL string) config.Config {
 // EdgeEntrypoints are ["websecure"]; all other timing/size fields are test defaults.
 func multiConfig(downstreams []config.Downstream) config.Config {
 	return config.Config{
-		ConfigPath:      "/config",
+		ConfigPath:      configPath,
 		RequestTimeout:  5 * time.Second,
 		MaxResponseSize: 10 * 1024 * 1024,
 		EdgeEntrypoints: []string{valueWebsecure},
@@ -670,7 +671,7 @@ func TestRefresh_FailingDownstream_HealthyDownstreamsStillServed(t *testing.T) {
 		{Name: "live", APIAddress: live.URL, TrafficAddress: "http://live:80", AllowedEntrypoints: []string{valueWeb}},
 	})
 
-	a, err := app.New(cfg)
+	a, err := app.New(cfg, app.WithSleep(func(time.Duration) {}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -691,7 +692,10 @@ func TestRefresh_FailingDownstream_LastGoodRoutesRetained(t *testing.T) {
 	// primary: healthy in cycle 1, returns 500 in cycle 2.
 	primary := sequencedDownstream(t, []map[string]any{
 		{valueAppA: map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: valueHostA, fieldStatus: valueEnabled, fieldProvider: valueDocker}},
-		nil, // cycle 2: 500
+		nil, // cycle 2+: 500 (three extra entries so the in-call retries of
+		nil, // cycle 2 also fail instead of wrapping back to the good payload)
+		nil,
+		nil,
 	})
 	// gpu: healthy in both cycles.
 	gpu := sequencedDownstream(t, []map[string]any{
@@ -704,7 +708,7 @@ func TestRefresh_FailingDownstream_LastGoodRoutesRetained(t *testing.T) {
 		{Name: valueGpu, APIAddress: gpu.URL, TrafficAddress: valueTrafficGpu, AllowedEntrypoints: []string{valueWeb}},
 	})
 
-	a, err := app.New(cfg)
+	a, err := app.New(cfg, app.WithSleep(func(time.Duration) {}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -730,11 +734,17 @@ func TestRefresh_FailingDownstream_LastGoodRoutesRetained(t *testing.T) {
 func TestRefresh_AllDownstreamsFail_LastGoodRoutesRetained(t *testing.T) {
 	primary := sequencedDownstream(t, []map[string]any{
 		{valueAppA: map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: valueHostA, fieldStatus: valueEnabled, fieldProvider: valueDocker}},
-		nil, // cycle 2: 500
+		nil, // cycle 2+: 500 (three extra entries so the in-call retries of
+		nil, // cycle 2 also fail instead of wrapping back to the good payload)
+		nil,
+		nil,
 	})
 	gpu := sequencedDownstream(t, []map[string]any{
 		{valueAppB: map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: valueHostB, fieldStatus: valueEnabled, fieldProvider: valueDocker}},
-		nil, // cycle 2: 500
+		nil, // cycle 2+: 500 (three extra entries so the in-call retries of
+		nil, // cycle 2 also fail instead of wrapping back to the good payload)
+		nil,
+		nil,
 	})
 
 	cfg := multiConfig([]config.Downstream{
@@ -742,7 +752,7 @@ func TestRefresh_AllDownstreamsFail_LastGoodRoutesRetained(t *testing.T) {
 		{Name: valueGpu, APIAddress: gpu.URL, TrafficAddress: valueTrafficGpu, AllowedEntrypoints: []string{valueWeb}},
 	})
 
-	a, err := app.New(cfg)
+	a, err := app.New(cfg, app.WithSleep(func(time.Duration) {}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1066,7 +1076,7 @@ func TestRefresh_MalformedJSON_LastGoodRetained(t *testing.T) {
 		{Name: valueGpu, APIAddress: live.URL, TrafficAddress: valueTrafficGpu, AllowedEntrypoints: []string{valueWeb}},
 	})
 
-	a, err := app.New(cfg)
+	a, err := app.New(cfg, app.WithSleep(func(time.Duration) {}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1120,7 +1130,7 @@ func TestRefresh_OversizedResponse_LastGoodRetained(t *testing.T) {
 	// Small enough to truncate the cycle-2 body mid-object, large enough for cycle 1.
 	cfg.MaxResponseSize = 1024
 
-	a, err := app.New(cfg)
+	a, err := app.New(cfg, app.WithSleep(func(time.Duration) {}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1148,7 +1158,7 @@ func TestRefresh_DownstreamUnreachableMidRun_LastGoodRetained(t *testing.T) {
 	})
 
 	cfg := testConfig(ds.URL, valueTrafficExample)
-	a, err := app.New(cfg)
+	a, err := app.New(cfg, app.WithSleep(func(time.Duration) {}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
