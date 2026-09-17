@@ -3,14 +3,18 @@ package app
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/traefik/genconf/dynamic"
 
@@ -38,9 +42,9 @@ func WithLogger(l *slog.Logger) Option {
 // App polls downstream Traefik instances and serves their merged route
 // configuration as a single Traefik file-provider JSON document.
 type App struct {
-	cfg    config.Config
-	client *http.Client
-	log    *slog.Logger
+	cfg     config.Config
+	clients map[string]*http.Client // one per downstream, keyed by name
+	log     *slog.Logger
 	// lastGood holds the most recent successful rawdata response per downstream.
 	// It is only accessed during Refresh, which the caller must not invoke
 	// concurrently.
@@ -49,12 +53,20 @@ type App struct {
 }
 
 // New returns a ready App configured from cfg.  Config is already validated by
-// config.Load; New always returns a nil error but keeps the error return for
-// future validation at construction time.
+// config.Load; New returns an error only when a downstream's TLS configuration
+// cannot be loaded.
 func New(cfg config.Config, opts ...Option) (*App, error) {
+	clients := make(map[string]*http.Client, len(cfg.Downstreams))
+	for _, ds := range cfg.Downstreams {
+		c, err := buildClient(ds, cfg.RequestTimeout)
+		if err != nil {
+			return nil, fmt.Errorf("downstream %q: %w", ds.Name, err)
+		}
+		clients[ds.Name] = c
+	}
 	a := &App{
 		cfg:      cfg,
-		client:   &http.Client{Timeout: cfg.RequestTimeout},
+		clients:  clients,
 		log:      slog.Default(),
 		lastGood: make(map[string]*rawdataResponse),
 	}
@@ -62,6 +74,43 @@ func New(cfg config.Config, opts ...Option) (*App, error) {
 		o(a)
 	}
 	return a, nil
+}
+
+// buildClient constructs an http.Client for one downstream.  When the
+// downstream carries no TLS config the default transport is used unchanged.
+func buildClient(ds config.Downstream, timeout time.Duration) (*http.Client, error) {
+	if ds.TLS == nil {
+		return &http.Client{Timeout: timeout}, nil
+	}
+
+	tlsCfg := &tls.Config{
+		InsecureSkipVerify: ds.TLS.InsecureSkipVerify, //nolint:gosec // operator-controlled setting
+	}
+
+	if ds.TLS.CA != "" {
+		caPEM, err := os.ReadFile(ds.TLS.CA)
+		if err != nil {
+			return nil, fmt.Errorf("read CA cert %q: %w", ds.TLS.CA, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("CA file %q: no valid PEM certificates found", ds.TLS.CA)
+		}
+		tlsCfg.RootCAs = pool
+	}
+
+	if ds.TLS.Cert != "" || ds.TLS.Key != "" {
+		cert, err := tls.LoadX509KeyPair(ds.TLS.Cert, ds.TLS.Key)
+		if err != nil {
+			return nil, fmt.Errorf("load client certificate: %w", err)
+		}
+		tlsCfg.Certificates = []tls.Certificate{cert}
+	}
+
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+	}, nil
 }
 
 // mergeResult accumulates routers, services, and rule-contributor tracking
@@ -151,7 +200,16 @@ func (a *App) fetchRawData(ctx context.Context, ds config.Downstream) (*rawdataR
 		return nil, fmt.Errorf("build request for %s: %w", ds.Name, err)
 	}
 
-	resp, err := a.client.Do(req)
+	if ds.Auth != nil {
+		switch {
+		case ds.Auth.Token != "":
+			req.Header.Set("Authorization", "Bearer "+ds.Auth.Token)
+		case ds.Auth.Username != "" || ds.Auth.Password != "":
+			req.SetBasicAuth(ds.Auth.Username, ds.Auth.Password)
+		}
+	}
+
+	resp, err := a.clients[ds.Name].Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch %s rawdata: %w", ds.Name, err)
 	}

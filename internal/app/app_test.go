@@ -3,11 +3,21 @@ package app_test
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"log/slog"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -48,6 +58,14 @@ const (
 	valueGpuAppB         = "gpu-app-b"
 )
 
+// shared string literals used in multiple helpers.
+const (
+	rawdataPath      = "/api/rawdata"
+	jsonFieldRouters = "routers"
+	pemTypeCert      = "CERTIFICATE"
+	pemTypeECKey     = "EC PRIVATE KEY"
+)
+
 // testConfig returns a minimal Config with one downstream pointed at apiURL,
 // serving traffic to trafficURL.  EdgeEntrypoints are ["web", "websecure"].
 func testConfig(apiURL, trafficURL string) config.Config {
@@ -85,12 +103,12 @@ func multiConfig(downstreams []config.Downstream) config.Config {
 // fakeDownstream starts an httptest.Server that serves the given routers at
 // GET /api/rawdata in Traefik rawdata format.
 func fakeDownstream(routers map[string]any) *httptest.Server {
-	body, err := json.Marshal(map[string]any{"routers": routers})
+	body, err := json.Marshal(map[string]any{jsonFieldRouters: routers})
 	if err != nil {
 		panic("fakeDownstream: json.Marshal: " + err.Error())
 	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/rawdata" {
+		if r.URL.Path != rawdataPath {
 			http.NotFound(w, r)
 			return
 		}
@@ -105,7 +123,7 @@ func sequencedDownstream(t *testing.T, responses []map[string]any) *httptest.Ser
 	t.Helper()
 	var n atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/rawdata" {
+		if r.URL.Path != rawdataPath {
 			http.NotFound(w, r)
 			return
 		}
@@ -115,7 +133,7 @@ func sequencedDownstream(t *testing.T, responses []map[string]any) *httptest.Ser
 			http.Error(w, "upstream error", http.StatusInternalServerError)
 			return
 		}
-		body, err := json.Marshal(map[string]any{"routers": routers})
+		body, err := json.Marshal(map[string]any{jsonFieldRouters: routers})
 		if err != nil {
 			http.Error(w, "marshal error", http.StatusInternalServerError)
 			return
@@ -738,4 +756,278 @@ func TestRefresh_AllDownstreamsFail_LastGoodRoutesRetained(t *testing.T) {
 	if _, ok := env.HTTP.Routers[valueGpuAppB]; !ok {
 		t.Error("gpu routes must be retained when all downstreams fail")
 	}
+}
+
+// ---- Issue #5 helpers -------------------------------------------------------
+
+// testCA holds a generated CA certificate and key for test TLS scenarios.
+type testCA struct {
+	cert    *x509.Certificate
+	key     *ecdsa.PrivateKey
+	certPEM []byte
+}
+
+// newTestCA generates a fresh self-signed CA cert valid for one hour.
+func newTestCA(t *testing.T) *testCA {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate CA key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create CA cert: %v", err)
+	}
+	cert, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		t.Fatalf("parse CA cert: %v", err)
+	}
+	return &testCA{
+		cert:    cert,
+		key:     key,
+		certPEM: pem.EncodeToMemory(&pem.Block{Type: pemTypeCert, Bytes: certDER}),
+	}
+}
+
+// signServerCert issues a server cert for 127.0.0.1 signed by the CA.
+func (ca *testCA) signServerCert(t *testing.T) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate server key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "127.0.0.1"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, &key.PublicKey, ca.key)
+	if err != nil {
+		t.Fatalf("create server cert: %v", err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal server key: %v", err)
+	}
+	pair, err := tls.X509KeyPair(
+		pem.EncodeToMemory(&pem.Block{Type: pemTypeCert, Bytes: certDER}),
+		pem.EncodeToMemory(&pem.Block{Type: pemTypeECKey, Bytes: keyDER}),
+	)
+	if err != nil {
+		t.Fatalf("build server tls.Certificate: %v", err)
+	}
+	return pair
+}
+
+// signClientCert issues a client cert signed by the CA and returns PEM-encoded cert and key.
+func (ca *testCA) signClientCert(t *testing.T) (certPEM, keyPEM []byte) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate client key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(3),
+		Subject:      pkix.Name{CommonName: "test-client"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, &key.PublicKey, ca.key)
+	if err != nil {
+		t.Fatalf("create client cert: %v", err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal client key: %v", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: pemTypeCert, Bytes: certDER}),
+		pem.EncodeToMemory(&pem.Block{Type: pemTypeECKey, Bytes: keyDER})
+}
+
+// writePEMFile writes content to a temp file and returns the path.
+func writePEMFile(t *testing.T, content []byte) string {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "*.pem")
+	if err != nil {
+		t.Fatalf("create temp file: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.Write(content); err != nil {
+		t.Fatalf("write pem file: %v", err)
+	}
+	return f.Name()
+}
+
+// requestCheckingDownstream starts a fake downstream that calls checkFn on
+// every /api/rawdata request before serving an empty rawdata JSON response.
+func requestCheckingDownstream(t *testing.T, checkFn func(t *testing.T, r *http.Request)) *httptest.Server {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{jsonFieldRouters: map[string]any{}})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != rawdataPath {
+			http.NotFound(w, r)
+			return
+		}
+		checkFn(t, r)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// tlsDownstreamWith starts an HTTPS fake downstream using the given TLS config.
+func tlsDownstreamWith(t *testing.T, tlsCfg *tls.Config) *httptest.Server {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{jsonFieldRouters: map[string]any{}})
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != rawdataPath {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	srv.TLS = tlsCfg
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// refreshWith builds an App from cfg, calls Refresh, and fatals on any error.
+func refreshWith(t *testing.T, cfg config.Config) {
+	t.Helper()
+	a, err := app.New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+}
+
+// ---- Issue #5, Cycle 1 ------------------------------------------------------
+
+// A downstream configured with a bearer token must send that exact
+// Authorization header on every poll request.
+func TestRefresh_BearerToken_SendsAuthorizationHeader(t *testing.T) {
+	const token = "my-secret-bearer-token"
+	ds := requestCheckingDownstream(t, func(t *testing.T, r *http.Request) {
+		t.Helper()
+		got := r.Header.Get("Authorization")
+		want := "Bearer " + token
+		if got != want {
+			t.Errorf("Authorization = %q, want %q", got, want)
+		}
+	})
+	cfg := testConfig(ds.URL, valueTrafficExample)
+	cfg.Downstreams[0].Auth = &config.Auth{Token: token}
+	refreshWith(t, cfg)
+}
+
+// ---- Issue #5, Cycle 2 ------------------------------------------------------
+
+// A downstream configured with basic auth credentials must send valid HTTP
+// basic auth on every poll request.
+func TestRefresh_BasicAuth_SendsCredentials(t *testing.T) {
+	const (
+		wantUser = "alice"
+		wantPass = "hunter2"
+	)
+	ds := requestCheckingDownstream(t, func(t *testing.T, r *http.Request) {
+		t.Helper()
+		user, pass, ok := r.BasicAuth()
+		if !ok {
+			t.Error("request carries no HTTP basic auth credentials")
+			return
+		}
+		if user != wantUser || pass != wantPass {
+			t.Errorf("basic auth = (%q, %q), want (%q, %q)", user, pass, wantUser, wantPass)
+		}
+	})
+	cfg := testConfig(ds.URL, valueTrafficExample)
+	cfg.Downstreams[0].Auth = &config.Auth{Username: wantUser, Password: wantPass}
+	refreshWith(t, cfg)
+}
+
+// ---- Issue #5, Cycle 3 ------------------------------------------------------
+
+// A downstream configured with a custom CA cert must successfully poll a
+// server whose certificate is signed by that CA.
+func TestRefresh_CustomCA_PollsHTTPSServer(t *testing.T) {
+	ca := newTestCA(t)
+	serverCert := ca.signServerCert(t)
+
+	ds := tlsDownstreamWith(t, &tls.Config{Certificates: []tls.Certificate{serverCert}})
+
+	caPath := writePEMFile(t, ca.certPEM)
+	cfg := testConfig(ds.URL, valueTrafficExample)
+	cfg.Downstreams[0].TLS = &config.TLS{CA: caPath}
+	refreshWith(t, cfg)
+}
+
+// ---- Issue #5, Cycle 4 ------------------------------------------------------
+
+// A downstream configured with insecure-skip-verify must successfully poll a
+// server presenting a self-signed certificate that the system trust store does
+// not recognise.
+func TestRefresh_InsecureSkipVerify_PollsSelfSignedServer(t *testing.T) {
+	// httptest.NewTLSServer uses a built-in self-signed cert not in any system
+	// trust store; a plain client would reject it.
+	ds := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != rawdataPath {
+			http.NotFound(w, r)
+			return
+		}
+		body, _ := json.Marshal(map[string]any{jsonFieldRouters: map[string]any{}})
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(ds.Close)
+
+	cfg := testConfig(ds.URL, valueTrafficExample)
+	cfg.Downstreams[0].TLS = &config.TLS{InsecureSkipVerify: true}
+	refreshWith(t, cfg)
+}
+
+// ---- Issue #5, Cycle 5 ------------------------------------------------------
+
+// A downstream configured with a client certificate must present it during the
+// TLS handshake.  The server requires and verifies a client cert; if none is
+// presented the handshake fails and Refresh returns an error.
+func TestRefresh_ClientCert_PresentedDuringTLS(t *testing.T) {
+	ca := newTestCA(t)
+	serverCert := ca.signServerCert(t)
+	clientCertPEM, clientKeyPEM := ca.signClientCert(t)
+
+	clientCAs := x509.NewCertPool()
+	clientCAs.AddCert(ca.cert)
+
+	ds := tlsDownstreamWith(t, &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    clientCAs,
+	})
+
+	certPath := writePEMFile(t, clientCertPEM)
+	keyPath := writePEMFile(t, clientKeyPEM)
+
+	cfg := testConfig(ds.URL, valueTrafficExample)
+	cfg.Downstreams[0].TLS = &config.TLS{CA: writePEMFile(t, ca.certPEM), Cert: certPath, Key: keyPath}
+	refreshWith(t, cfg)
 }
