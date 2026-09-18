@@ -65,7 +65,7 @@ func newLogger(stderr io.Writer, level, format string) *slog.Logger {
 // to stderr and returns ok=false with code 2; on a missing config path it
 // prints a hint and returns ok=false with code 1. ok=true carries the
 // resolved path. Messages go through log, the pre-config default logger.
-func resolveConfigPath(args []string, stderr io.Writer, log *slog.Logger) (path string, code int, ok bool) {
+func resolveConfigPath(ctx context.Context, args []string, stderr io.Writer, log *slog.Logger) (path string, code int, ok bool) {
 	fs := flag.NewFlagSet("traefik-scout", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
@@ -87,7 +87,7 @@ func resolveConfigPath(args []string, stderr io.Writer, log *slog.Logger) (path 
 		cfgPath = os.Getenv(EnvConfigPath)
 	}
 	if cfgPath == "" {
-		log.ErrorContext(context.Background(), "no config file: use -config or set "+EnvConfigPath)
+		log.ErrorContext(ctx, "no config file: use -config or set "+EnvConfigPath)
 		return "", 1, false
 	}
 	return cfgPath, 0, true
@@ -131,11 +131,9 @@ func WithHandler(h http.Handler) Option {
 // shutdownTimeout. opts applies optional behavior (WithOnListen, WithHandler);
 // production callers pass none.
 func Run(ctx context.Context, args []string, stderr io.Writer, opts ...Option) int {
-	// Pre-config logger: config-driven level/format are unknowable before
-	// the file loads, so early diagnostics use the text default at info.
 	log := newLogger(stderr, config.DefaultLogLevel, config.DefaultLogFormat)
 
-	cfgPath, code, ok := resolveConfigPath(args, stderr, log)
+	cfgPath, code, ok := resolveConfigPath(ctx, args, stderr, log)
 	if !ok {
 		return code
 	}
@@ -146,9 +144,6 @@ func Run(ctx context.Context, args []string, stderr io.Writer, opts ...Option) i
 		return 1
 	}
 
-	// The config-provided logger serves everything from here on: cli's own
-	// startup, listen, and shutdown messages and the App's diagnostics share
-	// one handler, so a process never emits two log formats.
 	log = newLogger(stderr, cfg.LogLevel, cfg.LogFormat)
 
 	var ro runOptions
