@@ -85,7 +85,7 @@ func getBody(t *testing.T, url string) string {
 	return string(b)
 }
 
-// Cycle 1: a config file that cannot be loaded or validated must exit
+// A config file that cannot be loaded or validated must exit
 // non-zero with the offending error on stderr, before any server starts.
 func TestRun_ConfigLoadError_ExitsNonZero(t *testing.T) {
 	var stderr strings.Builder
@@ -100,7 +100,7 @@ func TestRun_ConfigLoadError_ExitsNonZero(t *testing.T) {
 	}
 }
 
-// Cycle 2: the -config flag wins over CONFIG_PATH when both are set.
+// The -config flag wins over CONFIG_PATH when both are set.
 func TestRun_FlagOverridesEnv(t *testing.T) {
 	var stderr strings.Builder
 	t.Setenv("CONFIG_PATH", "testdata/env_path_bad.yaml")
@@ -115,7 +115,7 @@ func TestRun_FlagOverridesEnv(t *testing.T) {
 	}
 }
 
-// Cycle 2b: CONFIG_PATH alone supplies the config path.
+// CONFIG_PATH alone supplies the config path.
 func TestRun_EnvConfigPathUsed(t *testing.T) {
 	var stderr strings.Builder
 	t.Setenv("CONFIG_PATH", "testdata/does_not_exist.yaml")
@@ -157,7 +157,7 @@ func serveRawdataOK(w http.ResponseWriter) {
 	_, _ = w.Write([]byte(`{"routers": {}}`))
 }
 
-// Cycle 4: cancelling the run context while a periodic refresh is in flight
+// Cancelling the run context while a periodic refresh is in flight
 // must abort the fetch through ctx, return 0 promptly, and close the listener.
 func TestServe_CancelDuringInFlightRefresh(t *testing.T) {
 	ds, inFlight := slowDownstream(t)
@@ -225,7 +225,7 @@ func TestServe_CancelDuringInFlightRefresh(t *testing.T) {
 	}
 }
 
-// Cycle 5: a YAML file whose content fails validation surfaces the offending
+// A YAML file whose content fails validation surfaces the offending
 // field through Run.
 func TestRun_InvalidYAMLContent_SurfacesValidationError(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
@@ -245,7 +245,7 @@ func TestRun_InvalidYAMLContent_SurfacesValidationError(t *testing.T) {
 	}
 }
 
-// Cycle 5b: Run end to end with a valid config file. It serves the merged
+// Run end to end with a valid config file. It serves the merged
 // snapshot on the bound address (announced on stderr), then exits 0 cleanly
 // on cancellation.
 func TestRun_ValidConfig_ServesAndShutsDownCleanly(t *testing.T) {
@@ -324,7 +324,7 @@ func gatedHandler(entered, release chan struct{}) http.Handler {
 	})
 }
 
-// Cycle 6: an HTTP request already in flight when the run context is
+// An HTTP request already in flight when the run context is
 // canceled must complete successfully. Shutdown waits for active handlers
 // instead of dropping the connection.
 func TestServe_InFlightRequestCompletesDuringShutdown(t *testing.T) {
@@ -429,7 +429,7 @@ func waitFor(t *testing.T, timeout time.Duration, check func() bool) {
 // entrypointWeb is the allowed edge entrypoint used across test fixtures.
 const entrypointWeb = "web"
 
-// Cycle 3: with a valid config and a live downstream, serve binds an ephemeral
+// With a valid config and a live downstream, serve binds an ephemeral
 // listener, runs an initial refresh, and serves the merged config, /healthz,
 // /readyz, and /metrics.
 func TestServe_ServesMergedConfigAndHealth(t *testing.T) {
