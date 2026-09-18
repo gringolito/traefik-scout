@@ -521,17 +521,17 @@ func hasAllowedEntrypoint(eps []string, allow map[string]struct{}) bool {
 func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(a.cfg.ConfigPath, a.serveSnapshot)
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc(config.PathHealthz, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc(config.PathReadyz, func(w http.ResponseWriter, _ *http.Request) {
 		if !a.everSucceeded.Load() {
 			http.Error(w, "no downstream polled successfully yet", http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.Handle("/metrics", promhttp.HandlerFor(a.metrics.reg, promhttp.HandlerOpts{}))
+	mux.Handle(config.PathMetrics, promhttp.HandlerFor(a.metrics.reg, promhttp.HandlerOpts{}))
 	return mux
 }
 

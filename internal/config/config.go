@@ -29,7 +29,18 @@ const (
 	DefaultPollInterval    = 30 * time.Second
 	DefaultRequestTimeout  = 5 * time.Second
 	DefaultMaxResponseSize = int64(10 * 1024 * 1024) // 10 MiB
+
+	// PathHealthz, PathReadyz, and PathMetrics are the endpoint paths the
+	// App's Handler always registers alongside the configured config_path.
+	// validate rejects a config_path that collides with any of them; app.go's
+	// Handler registers them under these same names, so the two stay in sync.
+	PathHealthz = "/healthz"
+	PathReadyz  = "/readyz"
+	PathMetrics = "/metrics"
 )
+
+// ReservedPaths lists the endpoint paths config_path must not collide with.
+var ReservedPaths = []string{PathHealthz, PathReadyz, PathMetrics}
 
 // Config holds the complete, validated application configuration.
 type Config struct {
@@ -208,9 +219,8 @@ func validate(cfg *Config) error {
 	if !strings.HasPrefix(cfg.ConfigPath, "/") {
 		return fmt.Errorf("config_path %q must be an absolute path starting with /", cfg.ConfigPath)
 	}
-	switch cfg.ConfigPath {
-	case "/healthz", "/readyz", "/metrics":
-		return fmt.Errorf("config_path %q collides with a reserved endpoint (healthz, readyz, metrics)", cfg.ConfigPath)
+	if slices.Contains(ReservedPaths, cfg.ConfigPath) {
+		return fmt.Errorf("config_path %q collides with a reserved endpoint (%s)", cfg.ConfigPath, strings.Join(ReservedPaths, ", "))
 	}
 	if len(cfg.EdgeEntrypoints) == 0 {
 		return fmt.Errorf("edge_entrypoints: at least one entrypoint is required, got none")
