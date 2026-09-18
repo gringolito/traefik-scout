@@ -24,6 +24,21 @@ import (
 	"github.com/gringolito/traefik-scout/internal/cli"
 )
 
+// whoamiRouter returns the rawdata payload used by the run-level fixtures:
+// one web-bound whoami router served by fakeDownstream.
+func whoamiRouter() map[string]any {
+	return map[string]any{
+		"whoami@file": map[string]any{
+			"entryPoints": []string{entrypointWeb},
+			"service":     "whoami",
+			"rule":        "Host(`example.com`)",
+			"status":      "enabled",
+			"provider":    "file",
+			"priority":    10,
+		},
+	}
+}
+
 // fakeDownstream starts an httptest.Server serving the given routers at
 // GET /api/rawdata in Traefik rawdata format.
 func fakeDownstream(t *testing.T, routers map[string]any) *httptest.Server {
@@ -191,7 +206,7 @@ func TestRun_CancelDuringInFlightRefresh(t *testing.T) {
 
 	// Wait until the initial refresh succeeded and the next poll is in flight.
 	base := "http://" + addr
-	waitFor(t, 5*time.Second, func() bool { return getStatus(t, base+"/readyz") == http.StatusOK })
+	waitFor(t, func() bool { return getStatus(t, base+"/readyz") == http.StatusOK })
 	select {
 	case <-inFlight:
 	case <-time.After(5 * time.Second):
@@ -266,18 +281,9 @@ func (s *safeStderr) String() string {
 // snapshot on the bound address (announced on stderr), then exits 0 cleanly
 // on cancellation.
 func TestRun_ValidConfig_ServesAndShutsDownCleanly(t *testing.T) {
-	ds := fakeDownstream(t, map[string]any{
-		"whoami@file": map[string]any{
-			"entryPoints": []string{entrypointWeb},
-			"service":     "whoami",
-			"rule":        "Host(`example.com`)",
-			"status":      "enabled",
-			"provider":    "file",
-			"priority":    10,
-		},
-	})
+	ds := fakeDownstream(t, whoamiRouter())
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	cfgYAML := fmt.Sprintf("listen: 127.0.0.1:0\npoll_interval: 50ms\nlog_level: error\nedge_entrypoints: [%s]\ndownstreams:\n  - name: primary\n    api_address: %s\n    traffic_address: %s\n    allowed_entrypoints: [%s]\n", entrypointWeb, ds.URL, ds.URL, entrypointWeb)
+	cfgYAML := fmt.Sprintf("listen: 127.0.0.1:0\npoll_interval: 50ms\nlog_level: info\nedge_entrypoints: [%s]\ndownstreams:\n  - name: primary\n    api_address: %s\n    traffic_address: %s\n    allowed_entrypoints: [%s]\n", entrypointWeb, ds.URL, ds.URL, entrypointWeb)
 	if err := os.WriteFile(path, []byte(cfgYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -291,10 +297,13 @@ func TestRun_ValidConfig_ServesAndShutsDownCleanly(t *testing.T) {
 	}()
 
 	var addr string
-	waitFor(t, 5*time.Second, func() bool {
+	waitFor(t, func() bool {
 		for line := range strings.SplitSeq(stderr.String(), "\n") {
-			if after, ok := strings.CutPrefix(line, "traefik-scout: listening on "); ok {
-				addr = strings.TrimSpace(after)
+			if !strings.Contains(line, "listening on") {
+				continue
+			}
+			if _, rest, ok := strings.Cut(line, "addr="); ok {
+				addr = strings.Trim(strings.TrimSpace(rest), `"`)
 				return true
 			}
 		}
@@ -429,10 +438,10 @@ func TestRun_InFlightRequestCompletesDuringShutdown(t *testing.T) {
 	}
 }
 
-// waitFor polls check until it returns true or the timeout elapses.
-func waitFor(t *testing.T, timeout time.Duration, check func() bool) {
+// waitFor polls check until it returns true or the default 5s timeout elapses.
+func waitFor(t *testing.T, check func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if check() {
 			return
@@ -449,16 +458,7 @@ const entrypointWeb = "web"
 // listener, runs an initial refresh, and serves the merged config, /healthz,
 // /readyz, and /metrics.
 func TestRun_ServesMergedConfigAndHealth(t *testing.T) {
-	ds := fakeDownstream(t, map[string]any{
-		"whoami@file": map[string]any{
-			"entryPoints": []string{entrypointWeb},
-			"service":     "whoami",
-			"rule":        "Host(`example.com`)",
-			"status":      "enabled",
-			"provider":    "file",
-			"priority":    10,
-		},
-	})
+	ds := fakeDownstream(t, whoamiRouter())
 
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	cfgYAML := fmt.Sprintf("listen: %s\nconfig_path: %s\npoll_interval: %s\nrequest_timeout: 5s\nmax_response_size: 10485760\nlog_level: %s\nedge_entrypoints: [%s]\ndownstreams:\n  - name: %s\n    api_address: %s\n    traffic_address: %s\n    allowed_entrypoints: [%s]\n", testListen, testConfigPath, testInitialPoll, testLogLevel, entrypointWeb, testDownstream, ds.URL, ds.URL, entrypointWeb)
@@ -523,5 +523,136 @@ func TestRun_ServesMergedConfigAndHealth(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after context cancellation")
+	}
+}
+
+// Issue #26: with log_level: debug the per-downstream poll line must appear
+// every cycle.
+func TestRun_DebugLevelEmitsPerDownstreamPollLines(t *testing.T) {
+	ds := fakeDownstream(t, whoamiRouter())
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	cfgYAML := fmt.Sprintf("listen: %s\npoll_interval: 20ms\nlog_level: debug\nedge_entrypoints: [%s]\ndownstreams:\n  - name: primary\n    api_address: %s\n    traffic_address: %s\n    allowed_entrypoints: [%s]\n", testListen, entrypointWeb, ds.URL, ds.URL, entrypointWeb)
+	if err := os.WriteFile(path, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stderr safeStderr
+	done := make(chan int, 1)
+	go func() {
+		done <- cli.Run(ctx, []string{"-" + cli.FlagConfigName, path}, &stderr)
+	}()
+
+	waitFor(t, func() bool {
+		return strings.Contains(stderr.String(), "downstream polled") &&
+			strings.Contains(stderr.String(), "primary")
+	})
+	cancel()
+	if code := <-done; code != 0 {
+		t.Errorf("exit code: got %d, want 0", code)
+	}
+}
+
+// Issue #26: with log_level: error the merged-output info line and the
+// per-downstream debug lines must be suppressed.
+func TestRun_ErrorLevelSuppressesInfoAndDebugLines(t *testing.T) {
+	ds := fakeDownstream(t, whoamiRouter())
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	cfgYAML := fmt.Sprintf("listen: %s\npoll_interval: 20ms\nlog_level: error\nedge_entrypoints: [%s]\ndownstreams:\n  - name: primary\n    api_address: %s\n    traffic_address: %s\n    allowed_entrypoints: [%s]\n", testListen, entrypointWeb, ds.URL, ds.URL, entrypointWeb)
+	if err := os.WriteFile(path, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stderr safeStderr
+	listened := make(chan struct{})
+	done := make(chan int, 1)
+	go func() {
+		done <- cli.Run(ctx, []string{"-" + cli.FlagConfigName, path}, &stderr, cli.WithOnListen(func(net.Listener) { close(listened) }))
+	}()
+	<-listened
+	// Let several poll cycles run before cancelling.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	if code := <-done; code != 0 {
+		t.Errorf("exit code: got %d, want 0", code)
+	}
+	if out := stderr.String(); strings.Contains(out, "merged configuration changed") || strings.Contains(out, "downstream polled") {
+		t.Errorf("log_level error must suppress info and debug lines, got: %q", out)
+	}
+}
+
+// Issue #26: log_format: json must emit one JSON object per stderr line.
+func TestRun_JSONFormatEmitsJSONLines(t *testing.T) {
+	ds := fakeDownstream(t, whoamiRouter())
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	cfgYAML := fmt.Sprintf("listen: %s\npoll_interval: 20ms\nlog_level: debug\nlog_format: json\nedge_entrypoints: [%s]\ndownstreams:\n  - name: primary\n    api_address: %s\n    traffic_address: %s\n    allowed_entrypoints: [%s]\n", testListen, entrypointWeb, ds.URL, ds.URL, entrypointWeb)
+	if err := os.WriteFile(path, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stderr safeStderr
+	done := make(chan int, 1)
+	go func() {
+		done <- cli.Run(ctx, []string{"-" + cli.FlagConfigName, path}, &stderr)
+	}()
+
+	waitFor(t, func() bool {
+		return strings.Contains(stderr.String(), "downstream polled")
+	})
+	cancel()
+	if code := <-done; code != 0 {
+		t.Errorf("exit code: got %d, want 0", code)
+	}
+
+	sawInfo := false
+	sawDebug := false
+	for line := range strings.SplitSeq(strings.TrimSuffix(stderr.String(), "\n"), "\n") {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Errorf("every stderr line must be a JSON object, got %q: %v", line, err)
+			continue
+		}
+		switch rec["msg"] {
+		case "merged configuration changed":
+			sawInfo = true
+		case "downstream polled":
+			sawDebug = true
+		}
+	}
+	if !sawInfo || !sawDebug {
+		t.Errorf("json output must include info and debug records, sawInfo=%v sawDebug=%v, output: %q", sawInfo, sawDebug, stderr.String())
+	}
+}
+
+// Issue #26: no log line may contain downstream secret values (auth
+// password or auth header values), even at debug level.
+func TestRun_LogsDoNotContainSecrets(t *testing.T) {
+	ds := fakeDownstream(t, whoamiRouter())
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	cfgYAML := fmt.Sprintf("listen: %s\npoll_interval: 20ms\nlog_level: debug\nedge_entrypoints: [%s]\ndownstreams:\n  - name: primary\n    api_address: %s\n    traffic_address: %s\n    allowed_entrypoints: [%s]\n    auth:\n      username: alice\n      password: s3cret-hunter2\n", testListen, entrypointWeb, ds.URL, ds.URL, entrypointWeb)
+	if err := os.WriteFile(path, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stderr safeStderr
+	done := make(chan int, 1)
+	go func() {
+		done <- cli.Run(ctx, []string{"-" + cli.FlagConfigName, path}, &stderr)
+	}()
+
+	waitFor(t, func() bool {
+		return strings.Contains(stderr.String(), "downstream polled")
+	})
+	cancel()
+	<-done
+	if out := stderr.String(); strings.Contains(out, "s3cret-hunter2") || strings.Contains(out, "alice") {
+		t.Errorf("log output must not contain secret values, got: %q", out)
 	}
 }

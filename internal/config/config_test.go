@@ -378,6 +378,73 @@ downstreams:
 	}
 }
 
+// Issue #26: log_format must default to "text" when unset.
+func TestLoad_LogFormatDefault(t *testing.T) {
+	path := writeYAML(t, `
+edge_entrypoints:
+  - websecure
+downstreams:
+  - name: primary
+    api_address: http://traefik:8080
+    traffic_address: http://traefik:80
+    allowed_entrypoints:
+      - web
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.LogFormat != "text" {
+		t.Errorf("log_format: got %q, want %q", cfg.LogFormat, "text")
+	}
+}
+
+// Issue #26: valid log_format values must load without error.
+func TestLoad_ValidLogFormats(t *testing.T) {
+	for _, format := range []string{"text", "json"} {
+		path := writeYAML(t, fmt.Sprintf(`
+log_format: %s
+edge_entrypoints:
+  - websecure
+downstreams:
+  - name: primary
+    api_address: http://traefik:8080
+    traffic_address: http://traefik:80
+    allowed_entrypoints:
+      - web
+`, format))
+		cfg, err := config.Load(path)
+		if err != nil {
+			t.Fatalf("log_format %q: unexpected error: %v", format, err)
+		}
+		if cfg.LogFormat != format {
+			t.Errorf("log_format: got %q, want %q", cfg.LogFormat, format)
+		}
+	}
+}
+
+// Issue #26: an unsupported log_format must fail at startup naming the field.
+func TestLoad_InvalidLogFormat_ReturnsError(t *testing.T) {
+	path := writeYAML(t, `
+log_format: csv
+edge_entrypoints:
+  - websecure
+downstreams:
+  - name: primary
+    api_address: http://traefik:8080
+    traffic_address: http://traefik:80
+    allowed_entrypoints:
+      - web
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for invalid log_format, got nil")
+	}
+	if !containsField(err, "log_format") {
+		t.Errorf("error must name 'log_format', got: %v", err)
+	}
+}
+
 // Issue #25 (user story 13): each downstream must name at least one
 // allowed_entrypoints value; "empty means publish everything" would publish
 // host-local routes at the edge.
