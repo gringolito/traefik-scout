@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -24,19 +25,21 @@ const EnvConfigPath = "CONFIG_PATH"
 // requests after SIGTERM/SIGINT.
 const shutdownTimeout = 10 * time.Second
 
+// readHeaderTimeout bounds how long the server waits to read a request's
+// headers, guarding against clients that open connections and never send a
+// complete request (slow-loris style). It is a per-connection guard,
+// unrelated to graceful shutdown.
+const readHeaderTimeout = 5 * time.Second
+
 // FlagConfigName is the -config flag name, used in usage text and tests.
 const FlagConfigName = "config"
 
-// Run is the command's main wiring, returning the process exit code.
-//
-// The config path resolves per EnvConfigPath and FlagConfigName. A load or
-// validation failure prints the error to stderr and returns 1 without
-// starting the HTTP server.
-//
-// ctx is the process-lifetime context, canceled by SIGTERM/SIGINT in main.
-// On cancellation Run stops polling and shuts the server down per
-// shutdownTimeout.
-func Run(ctx context.Context, args []string, stderr io.Writer) int {
+// resolveConfigPath parses command-line flags and the CONFIG_PATH environment
+// variable into the config file path. On a flag-parse error it prints usage
+// to stderr and returns ok=false with code 2; on a missing config path it
+// prints a hint and returns ok=false with code 1. ok=true carries the
+// resolved path.
+func resolveConfigPath(args []string, stderr io.Writer) (path string, code int, ok bool) {
 	fs := flag.NewFlagSet("traefik-scout", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
@@ -50,7 +53,7 @@ func Run(ctx context.Context, args []string, stderr io.Writer) int {
 	}
 	cfgFlag := fs.String(FlagConfigName, "", "path to the YAML config file (overrides $"+EnvConfigPath+")")
 	if err := fs.Parse(args); err != nil {
-		return 2
+		return "", 2, false
 	}
 
 	cfgPath := *cfgFlag
@@ -59,7 +62,52 @@ func Run(ctx context.Context, args []string, stderr io.Writer) int {
 	}
 	if cfgPath == "" {
 		_, _ = fmt.Fprintf(stderr, "traefik-scout: no config file: use -config or set %s\n", EnvConfigPath)
-		return 1
+		return "", 1, false
+	}
+	return cfgPath, 0, true
+}
+
+// Option configures optional behavior of Run beyond the config file.
+type Option func(*runOptions)
+
+// runOptions carries the optional behavior Run applies after the config file
+// has been loaded.
+type runOptions struct {
+	onListen func(net.Listener)
+	handler  http.Handler
+}
+
+// WithOnListen registers a callback invoked with the bound listener once Run
+// binds it, in addition to the "listening on" message Run always writes to
+// stderr. Useful for discovering an ephemeral port (cfg.Listen ending in
+// ":0") without parsing stderr.
+func WithOnListen(f func(net.Listener)) Option {
+	return func(o *runOptions) { o.onListen = f }
+}
+
+// WithHandler overrides the handler Run serves instead of the App's own
+// Handler(). Intended for tests that need to observe or control individual
+// requests (for example, verifying graceful-shutdown drain behavior), since
+// App's production Handler() always answers instantly from a cached
+// snapshot and cannot itself be made to block.
+func WithHandler(h http.Handler) Option {
+	return func(o *runOptions) { o.handler = h }
+}
+
+// Run is the command's main wiring, returning the process exit code.
+//
+// The config path resolves per EnvConfigPath and FlagConfigName. A load or
+// validation failure prints the error to stderr and returns 1 without
+// starting the HTTP server.
+//
+// ctx is the process-lifetime context, canceled by SIGTERM/SIGINT in main.
+// On cancellation Run stops polling and shuts the server down per
+// shutdownTimeout. opts applies optional behavior (WithOnListen, WithHandler);
+// production callers pass none.
+func Run(ctx context.Context, args []string, stderr io.Writer, opts ...Option) int {
+	cfgPath, code, ok := resolveConfigPath(args, stderr)
+	if !ok {
+		return code
 	}
 
 	cfg, err := config.Load(cfgPath)
@@ -68,15 +116,23 @@ func Run(ctx context.Context, args []string, stderr io.Writer) int {
 		return 1
 	}
 
+	var ro runOptions
+	for _, o := range opts {
+		o(&ro)
+	}
+
 	return serve(ctx, cfg, stderr, func(l net.Listener) {
 		_, _ = fmt.Fprintf(stderr, "traefik-scout: listening on %s\n", l.Addr())
-	}, nil)
+		if ro.onListen != nil {
+			ro.onListen(l)
+		}
+	}, ro.handler)
 }
 
 // serve constructs the App, runs one synchronous refresh, serves the handler
 // on cfg.Listen, and polls on cfg.PollInterval until ctx is canceled.
 // onListen is called with the bound listener (use nil to ignore it).
-// handler overrides theApp.Handler() when non-nil (test seam only).
+// handler, when non-nil, overrides theApp.Handler().
 func serve(ctx context.Context, cfg *config.Config, stderr io.Writer, onListen func(net.Listener), handler http.Handler) int {
 	theApp, err := app.New(*cfg)
 	if err != nil {
@@ -84,8 +140,11 @@ func serve(ctx context.Context, cfg *config.Config, stderr io.Writer, onListen f
 		return 1
 	}
 
-	// Downstreams may be down at boot; the App serves an empty snapshot until
-	// a poll succeeds, so log and continue rather than failing startup.
+	// App.Refresh never fails on a downstream being down or slow: it retries,
+	// falls back to the last-known-good snapshot, and logs per-poll failures
+	// itself. The only error it returns is a failure to marshal the merged
+	// snapshot, which would be a bug; surface it on stderr without killing
+	// startup.
 	if err := theApp.Refresh(ctx); err != nil {
 		_, _ = fmt.Fprintf(stderr, "traefik-scout: initial refresh failed: %v\n", err)
 	}
@@ -109,9 +168,13 @@ func serve(ctx context.Context, cfg *config.Config, stderr io.Writer, onListen f
 	}
 	server := &http.Server{
 		Handler:           handler,
-		ReadHeaderTimeout: shutdownTimeout,
+		ReadHeaderTimeout: readHeaderTimeout,
 	}
-	go func() { _ = server.Serve(listener) }()
+	go func() {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			_, _ = fmt.Fprintf(stderr, "traefik-scout: serve: %v\n", err)
+		}
+	}()
 
 	<-ctx.Done()
 	stopPoll()
@@ -133,6 +196,10 @@ func pollLoop(ctx context.Context, theApp *app.App, interval time.Duration, stde
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// As with the initial refresh, Refresh returns non-nil only when
+			// the merged snapshot cannot be marshaled; per-downstream poll
+			// failures are logged and recovered inside the App. Surface the
+			// marshal error on stderr and keep polling.
 			if err := theApp.Refresh(ctx); err != nil {
 				_, _ = fmt.Fprintf(stderr, "traefik-scout: refresh failed: %v\n", err)
 			}

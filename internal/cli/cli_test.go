@@ -1,3 +1,8 @@
+// Tests drive the command through its public Run entry point: WithOnListen
+// hands the test the bound listener (so tests need not parse stderr), and
+// WithHandler substitutes a request handler when a test must control
+// individual requests. Both are real functional options, so no test-only
+// export shim or in-package test file is needed.
 package cli_test
 
 import (
@@ -17,7 +22,6 @@ import (
 	"time"
 
 	"github.com/gringolito/traefik-scout/internal/cli"
-	"github.com/gringolito/traefik-scout/internal/config"
 )
 
 // fakeDownstream starts an httptest.Server serving the given routers at
@@ -159,21 +163,13 @@ func serveRawdataOK(w http.ResponseWriter) {
 
 // Cancelling the run context while a periodic refresh is in flight
 // must abort the fetch through ctx, return 0 promptly, and close the listener.
-func TestServe_CancelDuringInFlightRefresh(t *testing.T) {
+func TestRun_CancelDuringInFlightRefresh(t *testing.T) {
 	ds, inFlight := slowDownstream(t)
 
-	cfg := config.Config{
-		Listen:          testListen,
-		ConfigPath:      testConfigPath,
-		PollInterval:    10 * time.Millisecond,
-		RequestTimeout:  5 * time.Second,
-		MaxResponseSize: 10 * 1024 * 1024,
-		LogLevel:        testLogLevel,
-		Downstreams: []config.Downstream{{
-			Name:           testDownstream,
-			APIAddress:     ds.URL,
-			TrafficAddress: ds.URL,
-		}},
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	cfgYAML := fmt.Sprintf("listen: %s\nconfig_path: %s\npoll_interval: 10ms\nrequest_timeout: 5s\nmax_response_size: 10485760\nlog_level: %s\ndownstreams:\n  - name: %s\n    api_address: %s\n    traffic_address: %s\n", testListen, testConfigPath, testLogLevel, testDownstream, ds.URL, ds.URL)
+	if err := os.WriteFile(path, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -182,7 +178,7 @@ func TestServe_CancelDuringInFlightRefresh(t *testing.T) {
 	listenerCh := make(chan net.Listener, 1)
 	done := make(chan int, 1)
 	go func() {
-		done <- cli.ServeForTest(ctx, &cfg, io.Discard, func(l net.Listener) { listenerCh <- l })
+		done <- cli.Run(ctx, []string{"-" + cli.FlagConfigName, path}, io.Discard, cli.WithOnListen(func(l net.Listener) { listenerCh <- l }))
 	}()
 
 	var addr string
@@ -190,7 +186,7 @@ func TestServe_CancelDuringInFlightRefresh(t *testing.T) {
 	case l := <-listenerCh:
 		addr = l.Addr().String()
 	case <-time.After(5 * time.Second):
-		t.Fatal("serve never bound a listener")
+		t.Fatal("Run never bound a listener")
 	}
 
 	// Wait until the initial refresh succeeded and the next poll is in flight.
@@ -213,7 +209,7 @@ func TestServe_CancelDuringInFlightRefresh(t *testing.T) {
 			t.Errorf("shutdown took %v; in-flight refresh did not abort via ctx", elapsed)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("serve did not return after cancellation")
+		t.Fatal("Run did not return after cancellation")
 	}
 
 	// The listener must be closed: new connections are refused.
@@ -245,6 +241,27 @@ func TestRun_InvalidYAMLContent_SurfacesValidationError(t *testing.T) {
 	}
 }
 
+// safeStderr is an io.Writer collecting stderr into a string. Writes come
+// from the goroutine running Run while the test goroutine reads inside
+// waitFor, so access is guarded by a mutex (strings.Builder is not safe for
+// concurrent use).
+type safeStderr struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (s *safeStderr) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *safeStderr) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
 // Run end to end with a valid config file. It serves the merged
 // snapshot on the bound address (announced on stderr), then exits 0 cleanly
 // on cancellation.
@@ -267,7 +284,7 @@ func TestRun_ValidConfig_ServesAndShutsDownCleanly(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var stderr strings.Builder
+	var stderr safeStderr
 	done := make(chan int, 1)
 	go func() {
 		done <- cli.Run(ctx, []string{"-" + cli.FlagConfigName, path}, &stderr)
@@ -302,7 +319,7 @@ func TestRun_ValidConfig_ServesAndShutsDownCleanly(t *testing.T) {
 	}
 }
 
-// Shared test fixture values reused across serve-level tests.
+// Shared test fixture values reused in the YAML config fixtures below.
 const (
 	testListen      = "127.0.0.1:0"
 	testConfigPath  = "/config"
@@ -327,21 +344,18 @@ func gatedHandler(entered, release chan struct{}) http.Handler {
 // An HTTP request already in flight when the run context is
 // canceled must complete successfully. Shutdown waits for active handlers
 // instead of dropping the connection.
-func TestServe_InFlightRequestCompletesDuringShutdown(t *testing.T) {
+func TestRun_InFlightRequestCompletesDuringShutdown(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	cfg := config.Config{
-		Listen:          testListen,
-		ConfigPath:      testConfigPath,
-		PollInterval:    time.Hour,
-		RequestTimeout:  5 * time.Second,
-		MaxResponseSize: 10 * 1024 * 1024,
-		LogLevel:        testLogLevel,
-		Downstreams: []config.Downstream{{
-			Name:           testDownstream,
-			APIAddress:     "http://127.0.0.1:1",
-			TrafficAddress: "http://127.0.0.1:80",
-		}},
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	// The downstream is unreachable on purpose: the failed initial refresh is
+	// logged, not fatal, and the server must still serve. poll_interval of 1h
+	// effectively disables periodic refreshes so the poller cannot interfere
+	// with the in-flight request.
+	cfgYAML := fmt.Sprintf("listen: %s\nconfig_path: %s\npoll_interval: 1h\nrequest_timeout: 5s\nmax_response_size: 10485760\nlog_level: %s\ndownstreams:\n  - name: %s\n    api_address: http://127.0.0.1:1\n    traffic_address: http://127.0.0.1:80\n", testListen, testConfigPath, testLogLevel, testDownstream)
+	if err := os.WriteFile(path, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -350,7 +364,9 @@ func TestServe_InFlightRequestCompletesDuringShutdown(t *testing.T) {
 	listenerCh := make(chan net.Listener, 1)
 	done := make(chan int, 1)
 	go func() {
-		done <- cli.ServeHandlerForTest(ctx, &cfg, io.Discard, gatedHandler(entered, release), func(l net.Listener) { listenerCh <- l })
+		done <- cli.Run(ctx, []string{"-" + cli.FlagConfigName, path}, io.Discard,
+			cli.WithOnListen(func(l net.Listener) { listenerCh <- l }),
+			cli.WithHandler(gatedHandler(entered, release)))
 	}()
 
 	var addr string
@@ -358,7 +374,7 @@ func TestServe_InFlightRequestCompletesDuringShutdown(t *testing.T) {
 	case l := <-listenerCh:
 		addr = l.Addr().String()
 	case <-time.After(5 * time.Second):
-		t.Fatal("serve never bound a listener")
+		t.Fatal("Run never bound a listener")
 	}
 
 	// A failed initial refresh is logged, not fatal; the server still serves.
@@ -409,7 +425,7 @@ func TestServe_InFlightRequestCompletesDuringShutdown(t *testing.T) {
 			t.Errorf("exit code: got %d, want 0", code)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("serve did not return after cancellation")
+		t.Fatal("Run did not return after cancellation")
 	}
 }
 
@@ -429,10 +445,10 @@ func waitFor(t *testing.T, timeout time.Duration, check func() bool) {
 // entrypointWeb is the allowed edge entrypoint used across test fixtures.
 const entrypointWeb = "web"
 
-// With a valid config and a live downstream, serve binds an ephemeral
+// With a valid config and a live downstream, Run binds an ephemeral
 // listener, runs an initial refresh, and serves the merged config, /healthz,
 // /readyz, and /metrics.
-func TestServe_ServesMergedConfigAndHealth(t *testing.T) {
+func TestRun_ServesMergedConfigAndHealth(t *testing.T) {
 	ds := fakeDownstream(t, map[string]any{
 		"whoami@file": map[string]any{
 			"entryPoints": []string{entrypointWeb},
@@ -444,19 +460,10 @@ func TestServe_ServesMergedConfigAndHealth(t *testing.T) {
 		},
 	})
 
-	cfg := config.Config{
-		Listen:          testListen,
-		ConfigPath:      testConfigPath,
-		PollInterval:    50 * time.Millisecond,
-		RequestTimeout:  5 * time.Second,
-		MaxResponseSize: 10 * 1024 * 1024,
-		LogLevel:        testLogLevel,
-		Downstreams: []config.Downstream{{
-			Name:               "primary",
-			APIAddress:         ds.URL,
-			TrafficAddress:     ds.URL,
-			AllowedEntrypoints: []string{entrypointWeb},
-		}},
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	cfgYAML := fmt.Sprintf("listen: %s\nconfig_path: %s\npoll_interval: %s\nrequest_timeout: 5s\nmax_response_size: 10485760\nlog_level: %s\ndownstreams:\n  - name: %s\n    api_address: %s\n    traffic_address: %s\n    allowed_entrypoints: [%s]\n", testListen, testConfigPath, testInitialPoll, testLogLevel, testDownstream, ds.URL, ds.URL, entrypointWeb)
+	if err := os.WriteFile(path, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -465,7 +472,7 @@ func TestServe_ServesMergedConfigAndHealth(t *testing.T) {
 	listenerCh := make(chan net.Listener, 1)
 	done := make(chan int, 1)
 	go func() {
-		done <- cli.ServeForTest(ctx, &cfg, io.Discard, func(l net.Listener) { listenerCh <- l })
+		done <- cli.Run(ctx, []string{"-" + cli.FlagConfigName, path}, io.Discard, cli.WithOnListen(func(l net.Listener) { listenerCh <- l }))
 	}()
 
 	var addr string
@@ -473,7 +480,7 @@ func TestServe_ServesMergedConfigAndHealth(t *testing.T) {
 	case l := <-listenerCh:
 		addr = l.Addr().String()
 	case <-time.After(5 * time.Second):
-		t.Fatal("serve never bound a listener")
+		t.Fatal("Run never bound a listener")
 	}
 	// Stop the server no matter how the test exits; the goroutine's exit code
 	// is read in the body when the run reaches it normally.
@@ -483,7 +490,7 @@ func TestServe_ServesMergedConfigAndHealth(t *testing.T) {
 
 	// The initial synchronous refresh must have populated the snapshot.  The
 	// merged document is a Traefik file-provider dynamic config: http.routers.
-	env := getJSON(t, base+cfg.ConfigPath)
+	env := getJSON(t, base+testConfigPath)
 	httpCfg, ok := env["http"].(map[string]any)
 	if !ok {
 		t.Fatalf("merged config missing http section: %v", env)
@@ -515,6 +522,6 @@ func TestServe_ServesMergedConfigAndHealth(t *testing.T) {
 			t.Errorf("exit code after cancellation: got %d, want 0", code)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("serve did not return after context cancellation")
+		t.Fatal("Run did not return after context cancellation")
 	}
 }
