@@ -30,6 +30,8 @@ jobs:
   publish:
     needs: [lint, test]
     runs-on: ubuntu-latest
+    env:
+      IMAGE: docker.io/gringolito/traefik-scout
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -42,13 +44,69 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Publishes only the version tag derived from the git tag (e.g. tag
-      # v1.2.3 -> traefik-scout:v1.2.3). No floating `latest` tag is ever pushed.
+      # Resolves the vX.Y, vX, and latest aliases from the release tags
+      # already published on Docker Hub, so a backport release can never
+      # move a newer alias or latest backward. A prerelease tag (e.g.
+      # v2.0.0-rc.1) always publishes only itself.
+      - name: Resolve image tags
+        id: tags
+        run: |
+          base_url="https://hub.docker.com/v2/repositories/${IMAGE#docker.io/}/tags?page_size=100"
+          url="$base_url"
+          : > published-tags.txt
+          while [ -n "$url" ]; do
+            set +e
+            response="$(curl -fsSL "$url")"
+            status=$?
+            set -e
+            if [ "$status" -eq 22 ] && [ "$url" = "$base_url" ]; then
+              response='{"results":[]}'
+            elif [ "$status" -ne 0 ]; then
+              exit 1
+            fi
+            jq -r '.results[].name' <<<"$response" >> published-tags.txt
+            url="$(jq -r '.next // empty' <<<"$response")"
+          done
+
+          current_tag="$GITHUB_REF_NAME"
+          if [[ ! "$current_tag" =~ ^v([0-9]+)\.([0-9]+)\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::not a valid semver release tag: $current_tag"
+            exit 1
+          fi
+          major="${BASH_REMATCH[1]}"
+          minor="${BASH_REMATCH[2]}"
+          prerelease="${BASH_REMATCH[3]}"
+
+          tags=("${IMAGE}:${current_tag}")
+          if [ -z "$prerelease" ]; then
+            release_tags="$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' published-tags.txt || true)"
+            all_tags="$(printf '%s\n%s\n' "$current_tag" "$release_tags" | sed '/^$/d')"
+            global_latest="$(sort -V <<<"$all_tags" | tail -n1)"
+            major_latest="$(grep -E "^v${major}\." <<<"$all_tags" | sort -V | tail -n1)"
+            minor_latest="$(grep -E "^v${major}\.${minor}\." <<<"$all_tags" | sort -V | tail -n1)"
+            if [ "$current_tag" = "$minor_latest" ]; then
+              tags+=("${IMAGE}:v${major}.${minor}")
+            fi
+            if [ "$current_tag" = "$major_latest" ]; then
+              tags+=("${IMAGE}:v${major}")
+            fi
+            if [ "$current_tag" = "$global_latest" ]; then
+              tags+=("${IMAGE}:latest")
+            fi
+          fi
+
+          {
+            echo 'tags<<EOF'
+            printf '%s\n' "${tags[@]}"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      # One buildx build with every resolved tag: all tags land on the same
+      # multi-arch digest.
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            docker.io/gringolito/traefik-scout:${{ github.ref_name }}
+          tags: ${{ steps.tags.outputs.tags }}
           provenance: false
