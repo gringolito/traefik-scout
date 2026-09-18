@@ -1,15 +1,5 @@
 # traefik-scout example configuration.
 #
-# traefik-scout runs beside your edge Traefik, polls each downstream Traefik's
-# /api/rawdata over its API, and serves the merged route configuration for the
-# edge's `http` provider to consume. Point the edge at
-# http://<this-host>:8080/config and it picks up every downstream route.
-#
-# Copy this file, edit the downstreams to match your network, and start the
-# binary with:  traefik-scout -config /path/to/config.yaml
-# Every field below is shown; fields marked with a default may simply be
-# omitted.
-
 # ---------------------------------------------------------------------------
 # Global settings
 # ---------------------------------------------------------------------------
