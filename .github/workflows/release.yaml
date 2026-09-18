@@ -30,6 +30,8 @@ jobs:
   publish:
     needs: [lint, test]
     runs-on: ubuntu-latest
+    env:
+      IMAGE: docker.io/gringolito/traefik-scout
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -47,18 +49,14 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # The build publishes the release tag itself plus the vX.Y, vX, and
-      # latest aliases. Each alias is included only when the tagged release is the
-      # newest in its semver series, so a backport release can never move a
-      # newer alias or latest backward. cmd/imagetags makes that decision
-      # from the release tags already published on Docker Hub; the Docker
-      # Hub v2 API is unauthenticated but paginated, so page through all of
-      # them. A 404 on the first page means the image does not exist yet
-      # (first-ever release, no published tags); any other error fails.
+      # cmd/imagetags resolves the vX.Y, vX, and latest aliases from the
+      # release tags already published on Docker Hub, so a backport release
+      # can never move a newer alias or latest backward (see
+      # internal/imagetags for the exact rule).
       - name: Resolve image tags
         id: tags
         run: |
-          base_url="https://hub.docker.com/v2/repositories/gringolito/traefik-scout/tags?page_size=100"
+          base_url="https://hub.docker.com/v2/repositories/${IMAGE#docker.io/}/tags?page_size=100"
           url="$base_url"
           : > published-tags.txt
           while [ -n "$url" ]; do
@@ -76,7 +74,7 @@ jobs:
           done
           {
             echo 'tags<<EOF'
-            go run ./cmd/imagetags "$GITHUB_REF_NAME" < published-tags.txt
+            go run ./cmd/imagetags "$GITHUB_REF_NAME" < published-tags.txt | sed "s#^#${IMAGE}:#"
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 

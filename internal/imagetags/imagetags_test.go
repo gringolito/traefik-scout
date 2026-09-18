@@ -99,3 +99,19 @@ func TestTags_TagValidation(t *testing.T) {
 		t.Error("expected error for non-semver tag banana, got nil")
 	}
 }
+
+// Cycle 5: a full prerelease tag (e.g. a release candidate) must publish only
+// itself. It must never claim vMAJOR.MINOR, vMAJOR, or latest, even when it
+// outranks every already-published release in its series by core version
+// alone. Those aliases are reserved for actual releases.
+func TestTags_PrereleasePublishesOnlyItself(t *testing.T) {
+	got, err := imagetags.Tags("v2.0.0-rc.1", []string{"v1.9.9"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := []string{"v2.0.0-rc.1"}
+	if !slices.Equal(got, want) {
+		t.Errorf("Tags(v2.0.0-rc.1) = %v, want %v", got, want)
+	}
+}

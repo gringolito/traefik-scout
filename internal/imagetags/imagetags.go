@@ -4,7 +4,9 @@
 // and latest, but only when it is the newest release in the corresponding
 // series. Publishing an older patch release (a backport) must never move a
 // newer major/minor alias or latest backward, so the existing published
-// release tags are compared by semver before any alias is added.
+// release tags are compared by semver before any alias is added. A
+// prerelease tag (e.g. v2.0.0-rc.1) is never the newest release in any
+// series and publishes only itself.
 package imagetags
 
 import (
@@ -14,15 +16,19 @@ import (
 )
 
 // Tags returns the registry tags to publish for newTag, given the set of
-// already-published tags on the image. The exact newTag is always included;
-// vMAJOR.MINOR, vMAJOR, and latest are included only when newTag is greater
-// than or equal to every already-published release in that series (or overall,
-// for latest). Tags that do not parse as full vX.Y.Z semver in existing are
-// ignored; a non-semver newTag is an error.
+// already-published tags on the image. The exact newTag is always included.
+// A full prerelease newTag (e.g. v2.0.0-rc.1) publishes only itself: vMAJOR.MINOR,
+// vMAJOR, and latest are reserved for actual releases. Otherwise those aliases
+// are included when newTag is greater than or equal to every already-published
+// release in that series (or overall, for latest). Tags that do not parse as
+// full vX.Y.Z semver in existing are ignored; a non-semver newTag is an error.
 func Tags(newTag string, existing []string) ([]string, error) {
 	newVersion, err := parseVersion(newTag)
 	if err != nil {
 		return nil, fmt.Errorf("new tag: %w", err)
+	}
+	if newVersion.pre != "" {
+		return []string{newTag}, nil
 	}
 
 	var maxSameMinor, maxSameMajor, maxOverall *version
