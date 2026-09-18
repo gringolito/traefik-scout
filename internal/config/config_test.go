@@ -3,6 +3,7 @@ package config_test
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -312,6 +313,47 @@ downstreams:
 	}
 	if !containsField(err, "cert") && !containsField(err, "key") {
 		t.Errorf("error must name cert or key, got: %v", err)
+	}
+}
+
+// The shipped config.example.yaml must load cleanly against the real loader
+// and must exercise every optional downstream field category, so the file
+// doubles as living schema documentation: if the loader gains a field or the
+// example drifts, this fails before release.
+func TestLoad_ExampleConfig(t *testing.T) {
+	cfg, err := config.Load(filepath.Join("..", "..", "config.example.yaml"))
+	if err != nil {
+		t.Fatalf("config.example.yaml must load without validation errors: %v", err)
+	}
+
+	if len(cfg.Downstreams) < 1 {
+		t.Fatal("config.example.yaml must contain at least one downstream")
+	}
+	// At least one downstream must exercise each optional field category, so
+	// the file doubles as schema documentation.
+	var seenAuth, seenTLS, seenPriority, seenStaleness bool
+	for _, d := range cfg.Downstreams {
+		seenAuth = seenAuth || d.Auth != nil
+		seenTLS = seenTLS || d.TLS != nil
+		seenPriority = seenPriority || d.PriorityOffset != 0
+		seenStaleness = seenStaleness || d.StalenessLimit > 0
+	}
+	if !seenAuth {
+		t.Error("example must demonstrate auth on at least one downstream")
+	}
+	if !seenTLS {
+		t.Error("example must demonstrate tls on at least one downstream")
+	}
+	if !seenPriority {
+		t.Error("example must demonstrate a non-zero priority_offset on at least one downstream")
+	}
+	if !seenStaleness {
+		t.Error("example must demonstrate a staleness_limit on at least one downstream")
+	}
+	for i, d := range cfg.Downstreams {
+		if len(d.AllowedEntrypoints) == 0 {
+			t.Errorf("downstream[%d] (%q): example must demonstrate allowed_entrypoints", i, d.Name)
+		}
 	}
 }
 

@@ -1,0 +1,121 @@
+# traefik-scout example configuration.
+#
+# traefik-scout runs beside your edge Traefik, polls each downstream Traefik's
+# /api/rawdata over its API, and serves the merged route configuration for the
+# edge's `http` provider to consume. Point the edge at
+# http://<this-host>:8080/config and it picks up every downstream route.
+#
+# Copy this file, edit the downstreams to match your network, and start the
+# binary with:  traefik-scout -config /path/to/config.yaml
+# Every field below is shown; fields marked with a default may simply be
+# omitted.
+
+# ---------------------------------------------------------------------------
+# Global settings
+# ---------------------------------------------------------------------------
+
+# Address the HTTP server listens on. The served configuration and the
+# /healthz, /readyz, and /metrics endpoints are all exposed here.
+# Default: ":8080"
+listen: ":8080"
+
+# URL path under which the merged dynamic configuration is served. This is the
+# URL you give the edge Traefik's `http` provider.
+# Default: "/config"
+config_path: "/config"
+
+# How often each downstream's API is polled. A new service appears at the edge
+# within one poll interval.
+# Default: "30s"
+poll_interval: 30s
+
+# Per-request timeout for a single downstream API call. Set this below the
+# poll interval so one slow downstream cannot consume the whole polling budget.
+# Default: "5s"
+request_timeout: 5s
+
+# Maximum accepted size of a downstream's /api/rawdata response, in bytes.
+# Protects against a misbehaving endpoint exhausting memory.
+# Default: 10485760 (10 MiB)
+max_response_size: 10485760
+
+# Entrypoint names the generated routers are bound to on the edge. Downstream
+# and edge entrypoint names are unrelated: routes found on a downstream's
+# `web`/`websecure` entrypoints are rebound to these names at the edge.
+# This is where your wildcard certificate lives, typically.
+edge_entrypoints:
+  - websecure
+
+# Log verbosity: one of "debug", "info", "warn", "error".
+# Default: "info"
+log_level: info
+
+# ---------------------------------------------------------------------------
+# Downstreams: one entry per upstream Traefik instance
+# ---------------------------------------------------------------------------
+
+downstreams:
+  # Internal identifier, used to prefix every router this downstream
+  # contributes ({name}-{router}) so two hosts defining a router called
+  # `dashboard` do not collide. Allowed characters: a-z, A-Z, 0-9, _, -.
+  # Required, must be unique.
+  - name: docker-host
+
+    # Base URL of the downstream Traefik API that /api/rawdata is polled on.
+    # This is the traefik entrypoint, or an explicitly exposed api@internal
+    # router, never the Docker socket. Required, absolute URL.
+    api_address: http://docker-host.lan:8080
+
+    # Where user traffic is sent for this downstream's routers. Independent of
+    # api_address: you typically poll the API on one port and route traffic on
+    # another. Required, absolute URL.
+    traffic_address: http://docker-host.lan:80
+
+    # Which of the downstream's own entrypoints are aggregated. Routers bound
+    # only to other downstream entrypoints (host-local tooling, for instance)
+    # are never published at the edge. Required.
+    allowed_entrypoints:
+      - web
+      - websecure
+
+    # Optional: bias this downstream's routers ahead of (positive) or behind
+    # (negative) another downstream's when their rules overlap.
+    # Default: 0
+    priority_offset: 100
+
+    # Optional: withdraw this downstream's routes after this long without a
+    # successful poll. Disabled by default, keeping last-known-good routes is
+    # the safer failure mode; opt in when a decommissioned host should
+    # eventually stop producing bad gateways.
+    # Default: disabled (routes are served indefinitely)
+    staleness_limit: 5m
+
+    # Optional: credentials for the downstream API. Exactly one of:
+    #   - static headers (bearer tokens, API keys), or
+    #   - username + password (HTTP basic auth).
+    # Setting both, or only one of username/password, fails validation.
+    auth:
+      headers:
+        Authorization: "Bearer change-me"
+
+    # Optional: TLS settings for connecting to the downstream API over HTTPS.
+    #   ca                    path to a PEM CA bundle for a private/self-signed
+    #                         downstream certificate. Default: system roots.
+    #   cert / key            client certificate and key for mTLS. Must be set
+    #                         together.
+    #   insecure_skip_verify  skip certificate verification. Escape hatch only.
+    #                         Default: false.
+    tls:
+      ca: /etc/traefik-scout/downstream-ca.crt
+      cert: /etc/traefik-scout/client.crt
+      key: /etc/traefik-scout/client.key
+      insecure_skip_verify: false
+
+  # A second downstream: the minimal form. Only the required fields; every
+  # global and optional value falls back to its default.
+  - name: gpu-host
+    api_address: http://gpu-host.lan:8080
+    traffic_address: http://gpu-host.lan:80
+    allowed_entrypoints:
+      - web
+      - websecure
