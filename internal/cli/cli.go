@@ -34,6 +34,13 @@ const readHeaderTimeout = 5 * time.Second
 // FlagConfigName is the -config flag name, used in usage text and tests.
 const FlagConfigName = "config"
 
+// logf writes a "traefik-scout: "-prefixed message to stderr, centralizing
+// the program-name prefix used by every diagnostic message Run and serve
+// print.
+func logf(stderr io.Writer, format string, args ...any) {
+	_, _ = fmt.Fprintf(stderr, "traefik-scout: "+format, args...)
+}
+
 // resolveConfigPath parses command-line flags and the CONFIG_PATH environment
 // variable into the config file path. On a flag-parse error it prints usage
 // to stderr and returns ok=false with code 2; on a missing config path it
@@ -61,7 +68,7 @@ func resolveConfigPath(args []string, stderr io.Writer) (path string, code int, 
 		cfgPath = os.Getenv(EnvConfigPath)
 	}
 	if cfgPath == "" {
-		_, _ = fmt.Fprintf(stderr, "traefik-scout: no config file: use -config or set %s\n", EnvConfigPath)
+		logf(stderr, "no config file: use -config or set %s\n", EnvConfigPath)
 		return "", 1, false
 	}
 	return cfgPath, 0, true
@@ -112,7 +119,7 @@ func Run(ctx context.Context, args []string, stderr io.Writer, opts ...Option) i
 
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "traefik-scout: %v\n", err)
+		logf(stderr, "%v\n", err)
 		return 1
 	}
 
@@ -122,7 +129,7 @@ func Run(ctx context.Context, args []string, stderr io.Writer, opts ...Option) i
 	}
 
 	return serve(ctx, cfg, stderr, func(l net.Listener) {
-		_, _ = fmt.Fprintf(stderr, "traefik-scout: listening on %s\n", l.Addr())
+		logf(stderr, "listening on %s\n", l.Addr())
 		if ro.onListen != nil {
 			ro.onListen(l)
 		}
@@ -136,7 +143,7 @@ func Run(ctx context.Context, args []string, stderr io.Writer, opts ...Option) i
 func serve(ctx context.Context, cfg *config.Config, stderr io.Writer, onListen func(net.Listener), handler http.Handler) int {
 	theApp, err := app.New(*cfg)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "traefik-scout: %v\n", err)
+		logf(stderr, "%v\n", err)
 		return 1
 	}
 
@@ -146,7 +153,7 @@ func serve(ctx context.Context, cfg *config.Config, stderr io.Writer, onListen f
 	// snapshot, which would be a bug; surface it on stderr without killing
 	// startup.
 	if err := theApp.Refresh(ctx); err != nil {
-		_, _ = fmt.Fprintf(stderr, "traefik-scout: initial refresh failed: %v\n", err)
+		logf(stderr, "initial refresh failed: %v\n", err)
 	}
 
 	pollCtx, stopPoll := context.WithCancel(ctx)
@@ -156,7 +163,7 @@ func serve(ctx context.Context, cfg *config.Config, stderr io.Writer, onListen f
 	var lc net.ListenConfig
 	listener, err := lc.Listen(ctx, "tcp", cfg.Listen)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "traefik-scout: listen %s: %v\n", cfg.Listen, err)
+		logf(stderr, "listen %s: %v\n", cfg.Listen, err)
 		return 1
 	}
 	if onListen != nil {
@@ -172,7 +179,7 @@ func serve(ctx context.Context, cfg *config.Config, stderr io.Writer, onListen f
 	}
 	go func() {
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			_, _ = fmt.Fprintf(stderr, "traefik-scout: serve: %v\n", err)
+			logf(stderr, "serve: %v\n", err)
 		}
 	}()
 
@@ -201,7 +208,7 @@ func pollLoop(ctx context.Context, theApp *app.App, interval time.Duration, stde
 			// failures are logged and recovered inside the App. Surface the
 			// marshal error on stderr and keep polling.
 			if err := theApp.Refresh(ctx); err != nil {
-				_, _ = fmt.Fprintf(stderr, "traefik-scout: refresh failed: %v\n", err)
+				logf(stderr, "refresh failed: %v\n", err)
 			}
 		}
 	}
