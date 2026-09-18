@@ -1,0 +1,8 @@
+.git
+.github
+.coverage
+cover.out
+*.md
+LICENSE
+mise.toml
+.tool-versions
