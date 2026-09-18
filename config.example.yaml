@@ -40,6 +40,11 @@ edge_entrypoints:
 # Default: "info"
 log_level: info
 
+# Log output format: "text" (human-readable key=value) or "json" (one JSON
+# object per line, for log shippers).
+# Default: "text"
+log_format: text
+
 # ---------------------------------------------------------------------------
 # Downstreams: one entry per upstream Traefik instance
 # ---------------------------------------------------------------------------

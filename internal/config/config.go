@@ -22,10 +22,19 @@ func validLogLevel(s string) bool {
 	return slices.Contains(supportedLogLevels, s)
 }
 
+// supportedLogFormats lists the accepted log_format values, matching the
+// slog handlers the CLI builds the shared logger from.
+var supportedLogFormats = []string{"text", "json"}
+
+func validLogFormat(s string) bool {
+	return slices.Contains(supportedLogFormats, s)
+}
+
 const (
 	DefaultListen          = ":8080"
 	DefaultConfigPath      = "/config"
 	DefaultLogLevel        = "info"
+	DefaultLogFormat       = "text"
 	DefaultPollInterval    = 30 * time.Second
 	DefaultRequestTimeout  = 5 * time.Second
 	DefaultMaxResponseSize = int64(10 * 1024 * 1024) // 10 MiB
@@ -51,6 +60,7 @@ type Config struct {
 	MaxResponseSize int64
 	EdgeEntrypoints []string
 	LogLevel        string
+	LogFormat       string
 	Downstreams     []Downstream
 }
 
@@ -92,6 +102,7 @@ type rawConfig struct {
 	MaxResponseSize int64           `yaml:"max_response_size"`
 	EdgeEntrypoints []string        `yaml:"edge_entrypoints"`
 	LogLevel        string          `yaml:"log_level"`
+	LogFormat       string          `yaml:"log_format"`
 	Downstreams     []rawDownstream `yaml:"downstreams"`
 }
 
@@ -111,6 +122,7 @@ func rawDefaults() *rawConfig {
 		Listen:          DefaultListen,
 		ConfigPath:      DefaultConfigPath,
 		LogLevel:        DefaultLogLevel,
+		LogFormat:       DefaultLogFormat,
 		PollInterval:    DefaultPollInterval.String(),
 		RequestTimeout:  DefaultRequestTimeout.String(),
 		MaxResponseSize: DefaultMaxResponseSize,
@@ -185,6 +197,7 @@ func convert(r *rawConfig) (*Config, error) {
 		MaxResponseSize: r.MaxResponseSize,
 		EdgeEntrypoints: r.EdgeEntrypoints,
 		LogLevel:        r.LogLevel,
+		LogFormat:       r.LogFormat,
 		Downstreams:     downstreams,
 	}, nil
 }
@@ -227,6 +240,9 @@ func validate(cfg *Config) error {
 	}
 	if !validLogLevel(cfg.LogLevel) {
 		return fmt.Errorf("log_level %q is not a supported level (supported: %s)", cfg.LogLevel, strings.Join(supportedLogLevels, ", "))
+	}
+	if !validLogFormat(cfg.LogFormat) {
+		return fmt.Errorf("log_format %q is not a supported format (supported: %s)", cfg.LogFormat, strings.Join(supportedLogFormats, ", "))
 	}
 	seen := make(map[string]int, len(cfg.Downstreams))
 	for i, d := range cfg.Downstreams {

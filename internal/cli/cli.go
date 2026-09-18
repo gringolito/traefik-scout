@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -34,19 +35,37 @@ const readHeaderTimeout = 5 * time.Second
 // FlagConfigName is the -config flag name, used in usage text and tests.
 const FlagConfigName = "config"
 
-// logf writes a "traefik-scout: "-prefixed message to stderr, centralizing
-// the program-name prefix used by every diagnostic message Run and serve
-// print.
-func logf(stderr io.Writer, format string, args ...any) {
-	_, _ = fmt.Fprintf(stderr, "traefik-scout: "+format, args...)
+// newLogger builds the process logger from the validated configuration:
+// level from log_level, handler format from log_format, writing to stderr.
+// Values are already validated by config.Load.
+func newLogger(stderr io.Writer, level, format string) *slog.Logger {
+	var lvl slog.Level
+	switch level {
+	case "debug":
+		lvl = slog.LevelDebug
+	case "warn":
+		lvl = slog.LevelWarn
+	case "error":
+		lvl = slog.LevelError
+	default:
+		lvl = slog.LevelInfo
+	}
+	opts := &slog.HandlerOptions{Level: lvl}
+	var h slog.Handler
+	if format == "json" {
+		h = slog.NewJSONHandler(stderr, opts)
+	} else {
+		h = slog.NewTextHandler(stderr, opts)
+	}
+	return slog.New(h)
 }
 
 // resolveConfigPath parses command-line flags and the CONFIG_PATH environment
 // variable into the config file path. On a flag-parse error it prints usage
 // to stderr and returns ok=false with code 2; on a missing config path it
 // prints a hint and returns ok=false with code 1. ok=true carries the
-// resolved path.
-func resolveConfigPath(args []string, stderr io.Writer) (path string, code int, ok bool) {
+// resolved path. Messages go through log, the pre-config default logger.
+func resolveConfigPath(ctx context.Context, args []string, stderr io.Writer, log *slog.Logger) (path string, code int, ok bool) {
 	fs := flag.NewFlagSet("traefik-scout", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
@@ -68,7 +87,7 @@ func resolveConfigPath(args []string, stderr io.Writer) (path string, code int, 
 		cfgPath = os.Getenv(EnvConfigPath)
 	}
 	if cfgPath == "" {
-		logf(stderr, "no config file: use -config or set %s\n", EnvConfigPath)
+		log.ErrorContext(ctx, "no config file: use -config or set "+EnvConfigPath)
 		return "", 1, false
 	}
 	return cfgPath, 0, true
@@ -112,58 +131,62 @@ func WithHandler(h http.Handler) Option {
 // shutdownTimeout. opts applies optional behavior (WithOnListen, WithHandler);
 // production callers pass none.
 func Run(ctx context.Context, args []string, stderr io.Writer, opts ...Option) int {
-	cfgPath, code, ok := resolveConfigPath(args, stderr)
+	log := newLogger(stderr, config.DefaultLogLevel, config.DefaultLogFormat)
+
+	cfgPath, code, ok := resolveConfigPath(ctx, args, stderr, log)
 	if !ok {
 		return code
 	}
 
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		logf(stderr, "%v\n", err)
+		log.ErrorContext(ctx, "failed to load config", "error", err)
 		return 1
 	}
+
+	log = newLogger(stderr, cfg.LogLevel, cfg.LogFormat)
 
 	var ro runOptions
 	for _, o := range opts {
 		o(&ro)
 	}
 
-	return serve(ctx, cfg, stderr, func(l net.Listener) {
-		logf(stderr, "listening on %s\n", l.Addr())
+	return serve(ctx, cfg, log, func(l net.Listener) {
+		log.InfoContext(ctx, "listening on", "addr", l.Addr().String())
 		if ro.onListen != nil {
 			ro.onListen(l)
 		}
 	}, ro.handler)
 }
 
-// serve constructs the App, runs one synchronous refresh, serves the handler
-// on cfg.Listen, and polls on cfg.PollInterval until ctx is canceled.
+// serve constructs the App with the shared logger, runs one synchronous
+// refresh, serves the handler on cfg.Listen, and polls on cfg.PollInterval
+// until ctx is canceled.
 // onListen is called with the bound listener (use nil to ignore it).
 // handler, when non-nil, overrides theApp.Handler().
-func serve(ctx context.Context, cfg *config.Config, stderr io.Writer, onListen func(net.Listener), handler http.Handler) int {
-	theApp, err := app.New(*cfg)
+func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, onListen func(net.Listener), handler http.Handler) int {
+	theApp, err := app.New(*cfg, app.WithLogger(log))
 	if err != nil {
-		logf(stderr, "%v\n", err)
+		log.ErrorContext(ctx, "failed to construct app", "error", err)
 		return 1
 	}
 
 	// App.Refresh never fails on a downstream being down or slow: it retries,
 	// falls back to the last-known-good snapshot, and logs per-poll failures
 	// itself. The only error it returns is a failure to marshal the merged
-	// snapshot, which would be a bug; surface it on stderr without killing
-	// startup.
+	// snapshot, which would be a bug; surface it without killing startup.
 	if err := theApp.Refresh(ctx); err != nil {
-		logf(stderr, "initial refresh failed: %v\n", err)
+		log.ErrorContext(ctx, "initial refresh failed", "error", err)
 	}
 
 	pollCtx, stopPoll := context.WithCancel(ctx)
 	defer stopPoll()
-	go pollLoop(pollCtx, theApp, cfg.PollInterval, stderr)
+	go pollLoop(pollCtx, theApp, cfg.PollInterval, log)
 
 	var lc net.ListenConfig
 	listener, err := lc.Listen(ctx, "tcp", cfg.Listen)
 	if err != nil {
-		logf(stderr, "listen %s: %v\n", cfg.Listen, err)
+		log.ErrorContext(ctx, "listen failed", "addr", cfg.Listen, "error", err)
 		return 1
 	}
 	if onListen != nil {
@@ -179,7 +202,7 @@ func serve(ctx context.Context, cfg *config.Config, stderr io.Writer, onListen f
 	}
 	go func() {
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logf(stderr, "serve: %v\n", err)
+			log.ErrorContext(ctx, "serve failed", "error", err)
 		}
 	}()
 
@@ -189,13 +212,14 @@ func serve(ctx context.Context, cfg *config.Config, stderr io.Writer, onListen f
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	_ = server.Shutdown(shutdownCtx)
+	log.InfoContext(ctx, "shutdown complete")
 	return 0
 }
 
 // pollLoop calls Refresh on every tick until ctx is canceled.  The first tick
 // fires after one interval; the initial snapshot comes from the synchronous
 // refresh in serve.
-func pollLoop(ctx context.Context, theApp *app.App, interval time.Duration, stderr io.Writer) {
+func pollLoop(ctx context.Context, theApp *app.App, interval time.Duration, log *slog.Logger) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -206,9 +230,9 @@ func pollLoop(ctx context.Context, theApp *app.App, interval time.Duration, stde
 			// As with the initial refresh, Refresh returns non-nil only when
 			// the merged snapshot cannot be marshaled; per-downstream poll
 			// failures are logged and recovered inside the App. Surface the
-			// marshal error on stderr and keep polling.
+			// marshal error and keep polling.
 			if err := theApp.Refresh(ctx); err != nil {
-				logf(stderr, "refresh failed: %v\n", err)
+				log.ErrorContext(ctx, "refresh failed", "error", err)
 			}
 		}
 	}
