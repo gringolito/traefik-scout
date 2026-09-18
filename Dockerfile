@@ -20,4 +20,7 @@ COPY --from=build /out/traefik-scout /traefik-scout
 
 USER 65532:65532
 
+# Runs with the config the server uses (-config falls back to CONFIG_PATH).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/traefik-scout", "-healthcheck"]
+
 ENTRYPOINT ["/traefik-scout"]
