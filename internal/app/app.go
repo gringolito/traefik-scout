@@ -266,11 +266,8 @@ func newMergeResult() *mergeResult {
 // Duplicate routing rules across downstreams are logged at WARN but still
 // served, letting Traefik resolve the conflict by priority.
 //
-// Observability: one DEBUG line per downstream per cycle records the poll
-// outcome; an INFO line is emitted exactly when the merged output changes
-// across cycles (never when it is unchanged).  Poll attempts, failures,
-// duration, last-success time, and the served router count are exported as
-// Prometheus metrics on /metrics.
+// Poll attempts, failures, duration, last-success time, and the served router
+// count are exported as Prometheus metrics on /metrics.
 func (a *App) Refresh(ctx context.Context) error {
 	result := newMergeResult()
 	contributed := false
@@ -284,33 +281,7 @@ func (a *App) Refresh(ctx context.Context) error {
 			a.state[ds.Name] = st
 		}
 
-		var raw *rawdataResponse
-		// Touching the failure counter creates the per-downstream child so a
-		// zero value is still exposed before the first failure.
-		failures := a.metrics.failures.WithLabelValues(ds.Name)
-		start := a.now()
-		if r, err := a.fetchWithRetry(ctx, ds); err != nil {
-			failures.Inc()
-			a.log.WarnContext(ctx, "poll failed, using last-known-good",
-				"downstream", ds.Name, "error", err, "attempts", fetchRetryMaxAttempts)
-			raw = a.lastGood[ds.Name] // nil when this downstream has never succeeded
-			a.log.DebugContext(ctx, "downstream polled",
-				"downstream", ds.Name, "success", false)
-		} else {
-			a.everSucceeded.Store(true)
-			a.metrics.lastSuccess.WithLabelValues(ds.Name).Set(float64(a.now().Unix()))
-			a.log.DebugContext(ctx, "downstream polled",
-				"downstream", ds.Name, "success", true)
-			if st.stale {
-				st.stale = false
-				a.log.InfoContext(ctx, "stale downstream recovered, reinstating routes",
-					"downstream", ds.Name)
-			}
-			st.lastSuccess = a.now()
-			a.lastGood[ds.Name] = r // store even when zero routers (valid empty result)
-			raw = r
-		}
-		a.metrics.duration.WithLabelValues(ds.Name).Observe(a.now().Sub(start).Seconds())
+		raw := a.pollDownstream(ctx, ds, st)
 
 		// Withdraw routes once the last successful poll is older than the limit.
 		if raw != nil && ds.StalenessLimit > 0 {
@@ -357,9 +328,7 @@ func (a *App) Refresh(ctx context.Context) error {
 	sum := sha256.Sum256(data)
 	prev := a.snap.Load()
 	if prev == nil || !bytes.Equal(prev.data, data) {
-		// The merged output genuinely changed: publish a new generation and
-		// log it.  Unchanged output still stores (the atomic swap for readers
-		// is preserved) but does not count as a new generation.
+		// Publish a new generation only when the merged output changed.
 		a.metrics.generation.Inc()
 		a.log.InfoContext(ctx, "merged configuration changed",
 			"routers", len(result.out.Routers))
@@ -370,6 +339,38 @@ func (a *App) Refresh(ctx context.Context) error {
 	})
 	a.metrics.routers.Set(float64(len(result.out.Routers)))
 	return nil
+}
+
+// pollDownstream polls one downstream and returns its data, falling back to
+// last-known-good on failure.
+func (a *App) pollDownstream(ctx context.Context, ds config.Downstream, st *pollState) *rawdataResponse {
+	// Touching the failure counter pre-creates the per-downstream child.
+	a.metrics.failures.WithLabelValues(ds.Name)
+	start := a.now()
+	var raw *rawdataResponse
+	if r, err := a.fetchWithRetry(ctx, ds); err != nil {
+		a.metrics.failures.WithLabelValues(ds.Name).Inc()
+		a.log.WarnContext(ctx, "poll failed, using last-known-good",
+			"downstream", ds.Name, "error", err, "attempts", fetchRetryMaxAttempts)
+		raw = a.lastGood[ds.Name] // nil when this downstream has never succeeded
+		a.log.DebugContext(ctx, "downstream polled",
+			"downstream", ds.Name, "success", false)
+	} else {
+		a.everSucceeded.Store(true)
+		a.metrics.lastSuccess.WithLabelValues(ds.Name).Set(float64(a.now().Unix()))
+		a.log.DebugContext(ctx, "downstream polled",
+			"downstream", ds.Name, "success", true)
+		if st.stale {
+			st.stale = false
+			a.log.InfoContext(ctx, "stale downstream recovered, reinstating routes",
+				"downstream", ds.Name)
+		}
+		st.lastSuccess = a.now()
+		a.lastGood[ds.Name] = r // store even when zero routers (valid empty result)
+		raw = r
+	}
+	a.metrics.duration.WithLabelValues(ds.Name).Observe(a.now().Sub(start).Seconds())
+	return raw
 }
 
 // fetchWithRetry retries fetchRawData up to fetchRetryMaxAttempts times with

@@ -66,7 +66,7 @@ func TestHandler_Healthz_WithAllDownstreamsDown(t *testing.T) {
 // ---- Issue #7, Cycle 2 ------------------------------------------------------
 
 // /readyz returns non-200 before any downstream has ever been polled
-// successfully — including after Refresh cycles that all failed.
+// successfully, including after Refresh cycles that all failed.
 func TestHandler_Readyz_NotReadyBeforeFirstSuccess(t *testing.T) {
 	cfg := testConfig("http://unreachable.invalid", "http://traffic.invalid")
 	a, err := app.New(cfg, app.WithSleep(func(time.Duration) {}))
@@ -84,7 +84,8 @@ func TestHandler_Readyz_NotReadyBeforeFirstSuccess(t *testing.T) {
 }
 
 // /readyz returns 200 once at least one downstream has ever been polled
-// successfully (cumulatively — later failures do not un-ready the process).
+// successfully. Readiness is cumulative: later failures do not un-ready
+// the process.
 func TestHandler_Readyz_ReadyAfterFirstSuccess(t *testing.T) {
 	// First cycle succeeds, second returns 500: readiness must persist.
 	ds := sequencedDownstream(t, []map[string]any{
