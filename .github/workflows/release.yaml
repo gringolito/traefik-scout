@@ -35,11 +35,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Runs cmd/imagetags below to resolve the tags to publish.
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
 
       - uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca # v3.9.0
@@ -49,10 +44,10 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # cmd/imagetags resolves the vX.Y, vX, and latest aliases from the
-      # release tags already published on Docker Hub, so a backport release
-      # can never move a newer alias or latest backward (see
-      # internal/imagetags for the exact rule).
+      # Resolves the vX.Y, vX, and latest aliases from the release tags
+      # already published on Docker Hub, so a backport release can never
+      # move a newer alias or latest backward. A prerelease tag (e.g.
+      # v2.0.0-rc.1) always publishes only itself.
       - name: Resolve image tags
         id: tags
         run: |
@@ -72,9 +67,37 @@ jobs:
             jq -r '.results[].name' <<<"$response" >> published-tags.txt
             url="$(jq -r '.next // empty' <<<"$response")"
           done
+
+          current_tag="$GITHUB_REF_NAME"
+          if [[ ! "$current_tag" =~ ^v([0-9]+)\.([0-9]+)\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::not a valid semver release tag: $current_tag"
+            exit 1
+          fi
+          major="${BASH_REMATCH[1]}"
+          minor="${BASH_REMATCH[2]}"
+          prerelease="${BASH_REMATCH[3]}"
+
+          tags=("${IMAGE}:${current_tag}")
+          if [ -z "$prerelease" ]; then
+            release_tags="$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' published-tags.txt || true)"
+            all_tags="$(printf '%s\n%s\n' "$current_tag" "$release_tags" | sed '/^$/d')"
+            global_latest="$(sort -V <<<"$all_tags" | tail -n1)"
+            major_latest="$(grep -E "^v${major}\." <<<"$all_tags" | sort -V | tail -n1)"
+            minor_latest="$(grep -E "^v${major}\.${minor}\." <<<"$all_tags" | sort -V | tail -n1)"
+            if [ "$current_tag" = "$minor_latest" ]; then
+              tags+=("${IMAGE}:v${major}.${minor}")
+            fi
+            if [ "$current_tag" = "$major_latest" ]; then
+              tags+=("${IMAGE}:v${major}")
+            fi
+            if [ "$current_tag" = "$global_latest" ]; then
+              tags+=("${IMAGE}:latest")
+            fi
+          fi
+
           {
             echo 'tags<<EOF'
-            go run ./cmd/imagetags "$GITHUB_REF_NAME" < published-tags.txt | sed "s#^#${IMAGE}:#"
+            printf '%s\n' "${tags[@]}"
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
