@@ -1,3 +1,5 @@
+edge_entrypoints:
+  - websecure
 downstreams:
   - name: primary
     api_address: http://traefik-primary:8080
