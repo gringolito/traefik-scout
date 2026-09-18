@@ -303,7 +303,7 @@ func (a *App) Refresh(ctx context.Context) error {
 			continue
 		}
 		contributed = true
-		a.mergeDownstream(ds, raw, result)
+		a.mergeDownstream(ctx, ds, raw, result)
 	}
 
 	// Nothing changed: keep the existing snapshot instead of clearing it.
@@ -437,7 +437,7 @@ func (a *App) fetchRawData(ctx context.Context, ds config.Downstream) (*rawdataR
 }
 
 // mergeDownstream transforms raw's routers and emits one service into result.
-func (a *App) mergeDownstream(ds config.Downstream, raw *rawdataResponse, result *mergeResult) {
+func (a *App) mergeDownstream(ctx context.Context, ds config.Downstream, raw *rawdataResponse, result *mergeResult) {
 	allow := entrypointSet(ds.AllowedEntrypoints)
 
 	for name, r := range raw.Routers {
@@ -445,7 +445,7 @@ func (a *App) mergeDownstream(ds config.Downstream, raw *rawdataResponse, result
 			continue
 		}
 		if r.Status != "enabled" {
-			a.log.Debug("skipping router with non-enabled status",
+			a.log.DebugContext(ctx, "skipping router with non-enabled status",
 				"router", name, "status", r.Status)
 			continue
 		}
