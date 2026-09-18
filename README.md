@@ -110,6 +110,13 @@ certificate on that entrypoint for real TLS.
 `traefik-scout` does not need a published port. Only the edge needs to be exposed to the host.
 Both services only need to communicate over a Docker Compose network.
 
+The image's `HEALTHCHECK` runs `traefik-scout -healthcheck`, which probes `GET /healthz` on the
+address from the same config file the server uses (never `/readyz`, which is legitimately 503
+while no downstream has ever answered).
+
+Kubernetes does not use Docker's `HEALTHCHECK` mechanism. There, use `httpGet` probes instead:
+`/healthz` for liveness and `/readyz` for readiness.
+
 Routes appear at the edge within one poll interval, which defaults to `30s`. See
 [config.example.yaml](config.example.yaml) for the complete schema, including defaults. The example
 loads directly with the real config loader and is covered by the test suite.
@@ -122,4 +129,5 @@ go build -o traefik-scout ./cmd/traefik-scout
 ```
 
 The `-config` flag and `CONFIG_PATH` environment variable are equivalent. The flag takes precedence
-when both are set.
+when both are set. `traefik-scout -healthcheck` self-probes `/healthz` using the same config file
+and exits 0 on a 200.

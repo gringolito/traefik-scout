@@ -60,26 +60,30 @@ func newLogger(stderr io.Writer, level, format string) *slog.Logger {
 	return slog.New(h)
 }
 
-// resolveConfigPath parses command-line flags and the CONFIG_PATH environment
-// variable into the config file path. On a flag-parse error it prints usage
+// parseArgs parses command-line flags and the CONFIG_PATH environment
+// variable into the config file path, and reports whether -healthcheck mode
+// was requested. On a flag-parse error it prints usage
 // to stderr and returns ok=false with code 2; on a missing config path it
 // prints a hint and returns ok=false with code 1. ok=true carries the
 // resolved path. Messages go through log, the pre-config default logger.
-func resolveConfigPath(ctx context.Context, args []string, stderr io.Writer, log *slog.Logger) (path string, code int, ok bool) {
+func parseArgs(ctx context.Context, args []string, stderr io.Writer, log *slog.Logger) (path string, healthcheck bool, code int, ok bool) {
 	fs := flag.NewFlagSet("traefik-scout", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
-		_, _ = fmt.Fprintf(stderr, "usage: traefik-scout [-config <path>]\n\n"+
+		_, _ = fmt.Fprintf(stderr, "usage: traefik-scout [-config <path>] [-healthcheck]\n\n"+
 			"serves merged Traefik route configuration from the downstreams in the\n"+
-			"config file, refreshing every poll_interval.\n\n"+
+			"config file, refreshing every poll_interval. With -healthcheck, it\n"+
+			"instead probes the /healthz endpoint of the server configured by the\n"+
+			"same config file and exits 0 when that answers 200.\n\n"+
 			"flags:\n")
 		fs.PrintDefaults()
 		_, _ = fmt.Fprintf(stderr, "\nThe config path comes from -config or the %s environment\n"+
 			"variable; the flag takes precedence when both are set.\n", EnvConfigPath)
 	}
 	cfgFlag := fs.String(FlagConfigName, "", "path to the YAML config file (overrides $"+EnvConfigPath+")")
+	hcFlag := fs.Bool(FlagHealthcheckName, false, "probe this server's /healthz endpoint using the config file's listen address, then exit")
 	if err := fs.Parse(args); err != nil {
-		return "", 2, false
+		return "", false, 2, false
 	}
 
 	cfgPath := *cfgFlag
@@ -88,9 +92,9 @@ func resolveConfigPath(ctx context.Context, args []string, stderr io.Writer, log
 	}
 	if cfgPath == "" {
 		log.ErrorContext(ctx, "no config file: use -config or set "+EnvConfigPath)
-		return "", 1, false
+		return "", false, 1, false
 	}
-	return cfgPath, 0, true
+	return cfgPath, *hcFlag, 0, true
 }
 
 // Option configures optional behavior of Run beyond the config file.
@@ -126,6 +130,10 @@ func WithHandler(h http.Handler) Option {
 // validation failure prints the error to stderr and returns 1 without
 // starting the HTTP server.
 //
+// With -healthcheck, Run probes the server's /healthz endpoint using the
+// loaded config's listen address and returns the probe's exit code without
+// starting the server or the poll loop.
+//
 // ctx is the process-lifetime context, canceled by SIGTERM/SIGINT in main.
 // On cancellation Run stops polling and shuts the server down per
 // shutdownTimeout. opts applies optional behavior (WithOnListen, WithHandler);
@@ -133,7 +141,7 @@ func WithHandler(h http.Handler) Option {
 func Run(ctx context.Context, args []string, stderr io.Writer, opts ...Option) int {
 	log := newLogger(stderr, config.DefaultLogLevel, config.DefaultLogFormat)
 
-	cfgPath, code, ok := resolveConfigPath(ctx, args, stderr, log)
+	cfgPath, healthcheck, code, ok := parseArgs(ctx, args, stderr, log)
 	if !ok {
 		return code
 	}
@@ -145,6 +153,12 @@ func Run(ctx context.Context, args []string, stderr io.Writer, opts ...Option) i
 	}
 
 	log = newLogger(stderr, cfg.LogLevel, cfg.LogFormat)
+
+	// Healthcheck mode short-circuits before the server starts: it reuses only
+	// the loaded config's listen address and never binds or polls itself.
+	if healthcheck {
+		return runHealthcheck(cfg, log)
+	}
 
 	var ro runOptions
 	for _, o := range opts {

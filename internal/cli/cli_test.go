@@ -656,3 +656,136 @@ func TestRun_LogsDoNotContainSecrets(t *testing.T) {
 		t.Errorf("log output must not contain secret values, got: %q", out)
 	}
 }
+
+// healthcheckServer serves GET /healthz with healthzStatus and 404 for any
+// other path, so a test controls exactly what a self-probe observes.
+func healthcheckServer(t *testing.T, healthzStatus int) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/healthz":
+			w.WriteHeader(healthzStatus)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// healthcheckConfig writes a minimal valid config file with the given listen
+// address and returns its path.
+func healthcheckConfig(t *testing.T, listen string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	cfgYAML := fmt.Sprintf("listen: %q\nedge_entrypoints: [%s]\n", listen, entrypointWeb)
+	if err := os.WriteFile(path, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// runHealthcheck invokes Run in healthcheck mode against the config at path
+// and returns the exit code.
+func runHealthcheck(t *testing.T, path string) int {
+	t.Helper()
+	var stderr strings.Builder
+	return cli.Run(context.Background(), []string{"-" + cli.FlagConfigName, path, "-" + cli.FlagHealthcheckName}, &stderr)
+}
+
+// In healthcheck mode Run probes /healthz on the configured listen address
+// and exits 0 on a 200. /readyz is NOT probed: readiness is legitimately 503
+// while no downstream has ever answered, and the container must not be marked
+// unhealthy for a remote host's outage.
+func TestRun_Healthcheck_ZeroOnHealthyHealthz(t *testing.T) {
+	srv := healthcheckServer(t, http.StatusOK)
+	path := healthcheckConfig(t, strings.TrimPrefix(srv.URL, "http://"))
+
+	if code := runHealthcheck(t, path); code != 0 {
+		t.Errorf("healthcheck against healthy /healthz: got %d, want 0", code)
+	}
+}
+
+// A wildcard listen host is a bind target, not a dial target, so the probe
+// must dial 127.0.0.1 with the configured port instead of the literal host.
+func TestRun_Healthcheck_WildcardHostDialsLoopback(t *testing.T) {
+	srv := healthcheckServer(t, http.StatusOK)
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := healthcheckConfig(t, "0.0.0.0:"+port)
+
+	if code := runHealthcheck(t, path); code != 0 {
+		t.Errorf("healthcheck with wildcard listen host: got %d, want 0", code)
+	}
+}
+
+// A wildcard IPv6 listen host dials the IPv6 loopback: [::] is a bind target,
+// not a dial target.
+func TestRun_Healthcheck_IPv6WildcardHostDialsIPv6Loopback(t *testing.T) {
+	srv := healthcheckServer(t, http.StatusOK)
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := healthcheckConfig(t, "[::]:"+port)
+
+	if code := runHealthcheck(t, path); code != 0 {
+		t.Errorf("healthcheck with [::] listen host: got %d, want 0", code)
+	}
+}
+
+// An explicit non-wildcard listen host is dialed as configured, not rewritten
+// to 127.0.0.1: the server only accepts connections on that host, so a
+// rewritten probe could not reach it.
+func TestRun_Healthcheck_ExplicitHostDialedAsConfigured(t *testing.T) {
+	var lc net.ListenConfig
+	l, err := lc.Listen(context.Background(), "tcp", "[::1]:0")
+	if err != nil {
+		t.Skipf("IPv6 loopback unavailable: %v", err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() { _ = srv.Serve(l) }()
+	t.Cleanup(func() { _ = l.Close() })
+
+	path := healthcheckConfig(t, l.Addr().String())
+
+	if code := runHealthcheck(t, path); code != 0 {
+		t.Errorf("healthcheck with explicit listen host %s: got %d, want 0", l.Addr(), code)
+	}
+}
+
+// A connection error (nothing listening on the configured port) must exit
+// non-zero, not hang.
+func TestRun_Healthcheck_NonZeroOnConnectionFailure(t *testing.T) {
+	path := healthcheckConfig(t, "127.0.0.1:1")
+
+	if code := runHealthcheck(t, path); code == 0 {
+		t.Error("healthcheck against a closed port: got 0, want non-zero")
+	}
+}
+
+// A reachable server answering non-200 on /healthz must exit non-zero.
+func TestRun_Healthcheck_NonZeroOnNon200(t *testing.T) {
+	srv := healthcheckServer(t, http.StatusInternalServerError)
+	path := healthcheckConfig(t, strings.TrimPrefix(srv.URL, "http://"))
+
+	if code := runHealthcheck(t, path); code == 0 {
+		t.Error("healthcheck against non-200 /healthz: got 0, want non-zero")
+	}
+}
+
+// The config schema does not validate listen, so an address without a port
+// must surface as a non-zero healthcheck exit, not a panic or a hang.
+func TestRun_Healthcheck_NonZeroOnUnparseableListen(t *testing.T) {
+	path := healthcheckConfig(t, "no-port-here")
+
+	if code := runHealthcheck(t, path); code == 0 {
+		t.Error("healthcheck with unparseable listen: got 0, want non-zero")
+	}
+}
