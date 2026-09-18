@@ -464,38 +464,6 @@ func TestRefreshAndHandler_ETagStability(t *testing.T) {
 	}
 }
 
-// Spec note: an empty AllowedEntrypoints passes every router through.  The
-// issue AC says "routers without an allow-listed entrypoint are excluded", but
-// an empty list is treated as no filter rather than "exclude all".  This test
-// documents and pins that decision.
-func TestRefreshAndHandler_EmptyAllowListPassesAll(t *testing.T) {
-	ds := fakeDownstream(map[string]any{
-		"any-router@docker": map[string]any{
-			fieldEntryPoints: []string{"whatever"},
-			fieldService:     valueSvcDocker,
-			fieldRule:        valueExampleRule,
-			fieldStatus:      valueEnabled,
-			fieldProvider:    valueDocker,
-		},
-	})
-	defer ds.Close()
-
-	cfg := testConfig(ds.URL, valueTrafficExample)
-	cfg.Downstreams[0].AllowedEntrypoints = nil // empty = no filter; all routers pass
-	a, err := app.New(cfg)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	if err := a.Refresh(context.Background()); err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
-
-	env := queryHandler(t, a.Handler(), cfg.ConfigPath)
-	if _, ok := env.HTTP.Routers["primary-any-router"]; !ok {
-		t.Error("empty AllowedEntrypoints must pass all routers through")
-	}
-}
-
 // Issue #4 — Cycle 1: three downstreams with distinct routes all appear in the
 // merged Handler response.
 func TestRefresh_ThreeDownstreams_AllRoutesAppear(t *testing.T) {

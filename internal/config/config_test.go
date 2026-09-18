@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -194,6 +195,210 @@ func TestLoad_InvalidAPIURL(t *testing.T) {
 	}
 }
 
+// Issue #25: a non-positive poll_interval must fail at startup with a message
+// naming the field, before the listener binds or the ticker panics.
+func TestLoad_NonPositivePollInterval_ReturnsError(t *testing.T) {
+	path := writeYAML(t, `
+poll_interval: 0s
+edge_entrypoints:
+  - websecure
+downstreams:
+  - name: primary
+    api_address: http://traefik:8080
+    traffic_address: http://traefik:80
+    allowed_entrypoints:
+      - web
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for zero poll_interval, got nil")
+	}
+	if !containsField(err, "poll_interval") {
+		t.Errorf("error must name 'poll_interval', got: %v", err)
+	}
+}
+
+// Issue #25: a non-positive request_timeout must fail at startup naming the field.
+func TestLoad_NonPositiveRequestTimeout_ReturnsError(t *testing.T) {
+	path := writeYAML(t, `
+request_timeout: -3s
+edge_entrypoints:
+  - websecure
+downstreams:
+  - name: primary
+    api_address: http://traefik:8080
+    traffic_address: http://traefik:80
+    allowed_entrypoints:
+      - web
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for negative request_timeout, got nil")
+	}
+	if !containsField(err, "request_timeout") {
+		t.Errorf("error must name 'request_timeout', got: %v", err)
+	}
+}
+
+// Issue #25: a non-positive max_response_size must fail at startup naming the
+// field: a zero limit makes every poll fail.
+func TestLoad_NonPositiveMaxResponseSize_ReturnsError(t *testing.T) {
+	path := writeYAML(t, `
+max_response_size: 0
+edge_entrypoints:
+  - websecure
+downstreams:
+  - name: primary
+    api_address: http://traefik:8080
+    traffic_address: http://traefik:80
+    allowed_entrypoints:
+      - web
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for zero max_response_size, got nil")
+	}
+	if !containsField(err, "max_response_size") {
+		t.Errorf("error must name 'max_response_size', got: %v", err)
+	}
+}
+
+// Issue #25: config_path must start with / and must not collide with the
+// health/metrics endpoints the App registers itself; a collision is a startup
+// error, not a ServeMux panic after the listener binds.
+func TestLoad_ConfigPathCollision_ReturnsError(t *testing.T) {
+	for _, reserved := range []string{"healthz", "readyz", "metrics"} {
+		path := writeYAML(t, fmt.Sprintf(`
+config_path: /%s
+edge_entrypoints:
+  - websecure
+downstreams:
+  - name: primary
+    api_address: http://traefik:8080
+    traffic_address: http://traefik:80
+    allowed_entrypoints:
+      - web
+`, reserved))
+		_, err := config.Load(path)
+		if err == nil {
+			t.Fatalf("config_path /%s: expected error, got nil", reserved)
+		}
+		if !containsField(err, "config_path") {
+			t.Errorf("config_path /%s: error must name 'config_path', got: %v", reserved, err)
+		}
+	}
+}
+
+// Issue #25: config_path must be an absolute path.
+func TestLoad_ConfigPathRelative_ReturnsError(t *testing.T) {
+	path := writeYAML(t, `
+config_path: config
+edge_entrypoints:
+  - websecure
+downstreams:
+  - name: primary
+    api_address: http://traefik:8080
+    traffic_address: http://traefik:80
+    allowed_entrypoints:
+      - web
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for relative config_path, got nil")
+	}
+	if !containsField(err, "config_path") {
+		t.Errorf("error must name 'config_path', got: %v", err)
+	}
+}
+
+// Issue #25 (user story 18): at least one edge_entrypoints value is required;
+// an empty list makes emitted routers carry no entryPoints key, so Traefik
+// binds them to every entrypoint including plain HTTP.
+func TestLoad_EmptyEdgeEntrypoints_ReturnsError(t *testing.T) {
+	path := writeYAML(t, `
+downstreams:
+  - name: primary
+    api_address: http://traefik:8080
+    traffic_address: http://traefik:80
+    allowed_entrypoints:
+      - web
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for empty edge_entrypoints, got nil")
+	}
+	if !containsField(err, "edge_entrypoints") {
+		t.Errorf("error must name 'edge_entrypoints', got: %v", err)
+	}
+}
+
+// Issue #25: log_level must accept only supported level names.
+func TestLoad_InvalidLogLevel_ReturnsError(t *testing.T) {
+	path := writeYAML(t, `
+log_level: bananas
+edge_entrypoints:
+  - websecure
+downstreams:
+  - name: primary
+    api_address: http://traefik:8080
+    traffic_address: http://traefik:80
+    allowed_entrypoints:
+      - web
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for invalid log_level, got nil")
+	}
+	if !containsField(err, "log_level") {
+		t.Errorf("error must name 'log_level', got: %v", err)
+	}
+}
+
+// Valid level names must load without error.
+func TestLoad_ValidLogLevels(t *testing.T) {
+	for _, level := range []string{"debug", "info", "warn", "error"} {
+		path := writeYAML(t, fmt.Sprintf(`
+log_level: %s
+edge_entrypoints:
+  - websecure
+downstreams:
+  - name: primary
+    api_address: http://traefik:8080
+    traffic_address: http://traefik:80
+    allowed_entrypoints:
+      - web
+`, level))
+		cfg, err := config.Load(path)
+		if err != nil {
+			t.Fatalf("log_level %q: unexpected error: %v", level, err)
+		}
+		if cfg.LogLevel != level {
+			t.Errorf("log_level: got %q, want %q", cfg.LogLevel, level)
+		}
+	}
+}
+
+// Issue #25 (user story 13): each downstream must name at least one
+// allowed_entrypoints value; "empty means publish everything" would publish
+// host-local routes at the edge.
+func TestLoad_MissingAllowedEntrypoints_ReturnsError(t *testing.T) {
+	path := writeYAML(t, `
+edge_entrypoints:
+  - websecure
+downstreams:
+  - name: primary
+    api_address: http://traefik:8080
+    traffic_address: http://traefik:80
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for missing allowed_entrypoints, got nil")
+	}
+	if !containsField(err, "allowed_entrypoints") {
+		t.Errorf("error must name 'allowed_entrypoints', got: %v", err)
+	}
+}
+
 func containsField(err error, field string) bool {
 	return err != nil && strings.Contains(err.Error(), field)
 }
@@ -215,10 +420,14 @@ func writeYAML(t *testing.T, content string) string {
 // Auth.headers must parse from YAML and be accessible on Downstream.Auth.
 func TestLoad_DownstreamAuthHeaders(t *testing.T) {
 	path := writeYAML(t, `
+edge_entrypoints:
+  - websecure
 downstreams:
   - name: primary
     api_address: http://traefik:8080
     traffic_address: http://traefik:80
+    allowed_entrypoints:
+      - web
     auth:
       headers:
         Authorization: "Bearer mytoken"
@@ -243,10 +452,14 @@ downstreams:
 // auth.username set without auth.password must fail at startup.
 func TestLoad_AuthUsernameWithoutPassword_ReturnsError(t *testing.T) {
 	path := writeYAML(t, `
+edge_entrypoints:
+  - websecure
 downstreams:
   - name: primary
     api_address: http://traefik:8080
     traffic_address: http://traefik:80
+    allowed_entrypoints:
+      - web
     auth:
       username: alice
 `)
@@ -262,10 +475,14 @@ downstreams:
 // auth.password set without auth.username must fail at startup.
 func TestLoad_AuthPasswordWithoutUsername_ReturnsError(t *testing.T) {
 	path := writeYAML(t, `
+edge_entrypoints:
+  - websecure
 downstreams:
   - name: primary
     api_address: http://traefik:8080
     traffic_address: http://traefik:80
+    allowed_entrypoints:
+      - web
     auth:
       password: secret
 `)
@@ -281,10 +498,14 @@ downstreams:
 // tls.cert set without tls.key must fail at startup with a message naming the fields.
 func TestLoad_TLSCertWithoutKey_ReturnsError(t *testing.T) {
 	path := writeYAML(t, `
+edge_entrypoints:
+  - websecure
 downstreams:
   - name: primary
     api_address: http://traefik:8080
     traffic_address: http://traefik:80
+    allowed_entrypoints:
+      - web
     tls:
       cert: /etc/ssl/client.crt
 `)
@@ -300,10 +521,14 @@ downstreams:
 // tls.key set without tls.cert must fail at startup with a message naming the fields.
 func TestLoad_TLSKeyWithoutCert_ReturnsError(t *testing.T) {
 	path := writeYAML(t, `
+edge_entrypoints:
+  - websecure
 downstreams:
   - name: primary
     api_address: http://traefik:8080
     traffic_address: http://traefik:80
+    allowed_entrypoints:
+      - web
     tls:
       key: /etc/ssl/client.key
 `)
@@ -360,10 +585,14 @@ func TestLoad_ExampleConfig(t *testing.T) {
 // auth.headers and auth.username/password cannot both be set.
 func TestLoad_AuthHeadersAndBasicAuth_ReturnsError(t *testing.T) {
 	path := writeYAML(t, `
+edge_entrypoints:
+  - websecure
 downstreams:
   - name: primary
     api_address: http://traefik:8080
     traffic_address: http://traefik:80
+    allowed_entrypoints:
+      - web
     auth:
       headers:
         X-Api-Key: mykey

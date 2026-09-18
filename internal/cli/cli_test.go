@@ -167,7 +167,7 @@ func TestRun_CancelDuringInFlightRefresh(t *testing.T) {
 	ds, inFlight := slowDownstream(t)
 
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	cfgYAML := fmt.Sprintf("listen: %s\nconfig_path: %s\npoll_interval: 10ms\nrequest_timeout: 5s\nmax_response_size: 10485760\nlog_level: %s\ndownstreams:\n  - name: %s\n    api_address: %s\n    traffic_address: %s\n", testListen, testConfigPath, testLogLevel, testDownstream, ds.URL, ds.URL)
+	cfgYAML := fmt.Sprintf("listen: %s\nconfig_path: %s\npoll_interval: 10ms\nrequest_timeout: 5s\nmax_response_size: 10485760\nlog_level: %s\nedge_entrypoints: [%s]\ndownstreams:\n  - name: %s\n    api_address: %s\n    traffic_address: %s\n    allowed_entrypoints: [%s]\n", testListen, testConfigPath, testLogLevel, entrypointWeb, testDownstream, ds.URL, ds.URL, entrypointWeb)
 	if err := os.WriteFile(path, []byte(cfgYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +225,7 @@ func TestRun_CancelDuringInFlightRefresh(t *testing.T) {
 // field through Run.
 func TestRun_InvalidYAMLContent_SurfacesValidationError(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	err := os.WriteFile(path, []byte("downstreams:\n  - name: primary\n"), 0o600)
+	err := os.WriteFile(path, []byte("edge_entrypoints: [websecure]\ndownstreams:\n  - name: primary\n    allowed_entrypoints: [web]\n"), 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ func TestRun_ValidConfig_ServesAndShutsDownCleanly(t *testing.T) {
 		},
 	})
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	cfgYAML := fmt.Sprintf("listen: 127.0.0.1:0\npoll_interval: 50ms\nlog_level: error\ndownstreams:\n  - name: primary\n    api_address: %s\n    traffic_address: %s\n", ds.URL, ds.URL)
+	cfgYAML := fmt.Sprintf("listen: 127.0.0.1:0\npoll_interval: 50ms\nlog_level: error\nedge_entrypoints: [%s]\ndownstreams:\n  - name: primary\n    api_address: %s\n    traffic_address: %s\n    allowed_entrypoints: [%s]\n", entrypointWeb, ds.URL, ds.URL, entrypointWeb)
 	if err := os.WriteFile(path, []byte(cfgYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +353,7 @@ func TestRun_InFlightRequestCompletesDuringShutdown(t *testing.T) {
 	// logged, not fatal, and the server must still serve. poll_interval of 1h
 	// effectively disables periodic refreshes so the poller cannot interfere
 	// with the in-flight request.
-	cfgYAML := fmt.Sprintf("listen: %s\nconfig_path: %s\npoll_interval: 1h\nrequest_timeout: 5s\nmax_response_size: 10485760\nlog_level: %s\ndownstreams:\n  - name: %s\n    api_address: http://127.0.0.1:1\n    traffic_address: http://127.0.0.1:80\n", testListen, testConfigPath, testLogLevel, testDownstream)
+	cfgYAML := fmt.Sprintf("listen: %s\nconfig_path: %s\npoll_interval: 1h\nrequest_timeout: 5s\nmax_response_size: 10485760\nlog_level: %s\nedge_entrypoints: [%s]\ndownstreams:\n  - name: %s\n    api_address: http://127.0.0.1:1\n    traffic_address: http://127.0.0.1:80\n    allowed_entrypoints: [%s]\n", testListen, testConfigPath, testLogLevel, entrypointWeb, testDownstream, entrypointWeb)
 	if err := os.WriteFile(path, []byte(cfgYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -461,7 +461,7 @@ func TestRun_ServesMergedConfigAndHealth(t *testing.T) {
 	})
 
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	cfgYAML := fmt.Sprintf("listen: %s\nconfig_path: %s\npoll_interval: %s\nrequest_timeout: 5s\nmax_response_size: 10485760\nlog_level: %s\ndownstreams:\n  - name: %s\n    api_address: %s\n    traffic_address: %s\n    allowed_entrypoints: [%s]\n", testListen, testConfigPath, testInitialPoll, testLogLevel, testDownstream, ds.URL, ds.URL, entrypointWeb)
+	cfgYAML := fmt.Sprintf("listen: %s\nconfig_path: %s\npoll_interval: %s\nrequest_timeout: 5s\nmax_response_size: 10485760\nlog_level: %s\nedge_entrypoints: [%s]\ndownstreams:\n  - name: %s\n    api_address: %s\n    traffic_address: %s\n    allowed_entrypoints: [%s]\n", testListen, testConfigPath, testInitialPoll, testLogLevel, entrypointWeb, testDownstream, ds.URL, ds.URL, entrypointWeb)
 	if err := os.WriteFile(path, []byte(cfgYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}

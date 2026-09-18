@@ -447,9 +447,9 @@ func (a *App) mergeDownstream(ds config.Downstream, raw *rawdataResponse, result
 		if r.Status == "disabled" {
 			continue
 		}
-		// A nil allow set means no entrypoints were configured: pass the router
-		// through unconditionally.  Empty AllowedEntrypoints = accept all.
-		if allow != nil && !hasAllowedEntrypoint(r.EntryPoints, allow) {
+		// Config validation requires at least one allowed entrypoint per
+		// downstream, so the filter is unconditional.
+		if !hasAllowedEntrypoint(r.EntryPoints, allow) {
 			continue
 		}
 
@@ -491,9 +491,6 @@ func stripProvider(name string) string {
 }
 
 func entrypointSet(eps []string) map[string]struct{} {
-	if len(eps) == 0 {
-		return nil
-	}
 	s := make(map[string]struct{}, len(eps))
 	for _, ep := range eps {
 		s[ep] = struct{}{}
@@ -524,17 +521,17 @@ func hasAllowedEntrypoint(eps []string, allow map[string]struct{}) bool {
 func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(a.cfg.ConfigPath, a.serveSnapshot)
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc(config.PathHealthz, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc(config.PathReadyz, func(w http.ResponseWriter, _ *http.Request) {
 		if !a.everSucceeded.Load() {
 			http.Error(w, "no downstream polled successfully yet", http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.Handle("/metrics", promhttp.HandlerFor(a.metrics.reg, promhttp.HandlerOpts{}))
+	mux.Handle(config.PathMetrics, promhttp.HandlerFor(a.metrics.reg, promhttp.HandlerOpts{}))
 	return mux
 }
 

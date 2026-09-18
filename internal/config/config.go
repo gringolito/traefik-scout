@@ -5,12 +5,22 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
 var validName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// supportedLogLevels lists the accepted log_level values, matching the
+// slog level names the App's logger understands.
+var supportedLogLevels = []string{"debug", "info", "warn", "error"}
+
+func validLogLevel(s string) bool {
+	return slices.Contains(supportedLogLevels, s)
+}
 
 const (
 	DefaultListen          = ":8080"
@@ -19,7 +29,18 @@ const (
 	DefaultPollInterval    = 30 * time.Second
 	DefaultRequestTimeout  = 5 * time.Second
 	DefaultMaxResponseSize = int64(10 * 1024 * 1024) // 10 MiB
+
+	// PathHealthz, PathReadyz, and PathMetrics are the endpoint paths the
+	// App's Handler always registers alongside the configured config_path.
+	// validate rejects a config_path that collides with any of them; app.go's
+	// Handler registers them under these same names, so the two stay in sync.
+	PathHealthz = "/healthz"
+	PathReadyz  = "/readyz"
+	PathMetrics = "/metrics"
 )
+
+// ReservedPaths lists the endpoint paths config_path must not collide with.
+var ReservedPaths = []string{PathHealthz, PathReadyz, PathMetrics}
 
 // Config holds the complete, validated application configuration.
 type Config struct {
@@ -186,6 +207,27 @@ func parseOptionalDuration(field, s string) (time.Duration, error) {
 }
 
 func validate(cfg *Config) error {
+	if cfg.PollInterval <= 0 {
+		return fmt.Errorf("poll_interval must be positive, got %s", cfg.PollInterval)
+	}
+	if cfg.RequestTimeout <= 0 {
+		return fmt.Errorf("request_timeout must be positive, got %s", cfg.RequestTimeout)
+	}
+	if cfg.MaxResponseSize <= 0 {
+		return fmt.Errorf("max_response_size must be positive, got %d", cfg.MaxResponseSize)
+	}
+	if !strings.HasPrefix(cfg.ConfigPath, "/") {
+		return fmt.Errorf("config_path %q must be an absolute path starting with /", cfg.ConfigPath)
+	}
+	if slices.Contains(ReservedPaths, cfg.ConfigPath) {
+		return fmt.Errorf("config_path %q collides with a reserved endpoint (%s)", cfg.ConfigPath, strings.Join(ReservedPaths, ", "))
+	}
+	if len(cfg.EdgeEntrypoints) == 0 {
+		return fmt.Errorf("edge_entrypoints: at least one entrypoint is required, got none")
+	}
+	if !validLogLevel(cfg.LogLevel) {
+		return fmt.Errorf("log_level %q is not a supported level (supported: %s)", cfg.LogLevel, strings.Join(supportedLogLevels, ", "))
+	}
 	seen := make(map[string]int, len(cfg.Downstreams))
 	for i, d := range cfg.Downstreams {
 		if !validName.MatchString(d.Name) {
@@ -196,6 +238,9 @@ func validate(cfg *Config) error {
 		}
 		if err := requireAbsoluteURL("traffic_address", d.TrafficAddress); err != nil {
 			return fmt.Errorf("downstream[%d] (%q): %w", i, d.Name, err)
+		}
+		if len(d.AllowedEntrypoints) == 0 {
+			return fmt.Errorf("downstream[%d] (%q): allowed_entrypoints: at least one entrypoint is required; an empty list must not be treated as \"publish all\"", i, d.Name)
 		}
 		if d.Auth != nil {
 			if (d.Auth.Username == "") != (d.Auth.Password == "") {
