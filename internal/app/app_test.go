@@ -317,6 +317,67 @@ func TestRefreshAndHandler_ExcludesDisabled(t *testing.T) {
 	}
 }
 
+// Issue #27: only routers with status exactly "enabled" are emitted; any
+// other status (e.g. "warning") is skipped and logged at debug with the
+// router's name and status.
+func TestRefreshAndHandler_ExcludesNonEnabledStatuses(t *testing.T) {
+	ds := fakeDownstream(map[string]any{
+		"on-router@docker": map[string]any{
+			fieldEntryPoints: []string{valueWeb},
+			fieldService:     valueSvcDocker,
+			fieldRule:        `Host("on.example.com")`,
+			fieldStatus:      valueEnabled,
+			fieldProvider:    valueDocker,
+		},
+		"off-router@docker": map[string]any{
+			fieldEntryPoints: []string{valueWeb},
+			fieldService:     valueSvcDocker,
+			fieldRule:        `Host("off.example.com")`,
+			fieldStatus:      "disabled",
+			fieldProvider:    valueDocker,
+		},
+		"warn-router@docker": map[string]any{
+			fieldEntryPoints: []string{valueWeb},
+			fieldService:     valueSvcDocker,
+			fieldRule:        `Host("warn.example.com")`,
+			fieldStatus:      "warning",
+			fieldProvider:    valueDocker,
+		},
+	})
+	defer ds.Close()
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	cfg := testConfig(ds.URL, valueTrafficExample)
+	a, err := app.New(cfg, app.WithLogger(logger))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	env := queryHandler(t, a.Handler(), cfg.ConfigPath)
+
+	if _, ok := env.HTTP.Routers["primary-on-router"]; !ok {
+		t.Errorf("enabled router must appear in output; got %v", routerKeys(env))
+	}
+	if _, ok := env.HTTP.Routers["primary-off-router"]; ok {
+		t.Error("disabled router must not appear in output")
+	}
+	if _, ok := env.HTTP.Routers["primary-warn-router"]; ok {
+		t.Error("warning-status router must not appear in output")
+	}
+
+	logOut := logBuf.String()
+	for _, want := range []string{"level=DEBUG", "skipping router with non-enabled status", "warn-router@docker", "warning"} {
+		if !strings.Contains(logOut, want) {
+			t.Errorf("skip log must contain %q; log:\n%s", want, logOut)
+		}
+	}
+}
+
 // Cycle 5: Routers whose entrypoints are not in the downstream allow-list must
 // be excluded.
 func TestRefreshAndHandler_ExcludesNonAllowedEntrypoints(t *testing.T) {

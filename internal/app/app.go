@@ -444,7 +444,9 @@ func (a *App) mergeDownstream(ds config.Downstream, raw *rawdataResponse, result
 		if isInternalProvider(name, r.Provider) {
 			continue
 		}
-		if r.Status == "disabled" {
+		if r.Status != "enabled" {
+			a.log.Debug("skipping router with non-enabled status",
+				"router", name, "status", r.Status)
 			continue
 		}
 		// Config validation requires at least one allowed entrypoint per
