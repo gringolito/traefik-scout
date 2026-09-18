@@ -1,11 +1,8 @@
 // Command traefik-scout polls downstream Traefik instances and serves their
 // merged route configuration as a single Traefik file-provider document.
 //
-// The config file path comes from the -config flag or the CONFIG_PATH
-// environment variable (the flag wins when both are set). The process exits
-// non-zero without serving when the config cannot be loaded or validated,
-// and shuts down gracefully, finishing in-flight requests, on SIGTERM or
-// SIGINT.
+// See internal/cli.Run for how the config path is resolved and how the
+// process exits or shuts down.
 package main
 
 import (

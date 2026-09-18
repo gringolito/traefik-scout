@@ -29,13 +29,13 @@ const FlagConfigName = "config"
 
 // Run is the command's main wiring, returning the process exit code.
 //
-// The config path resolves in order: the -config flag, then the CONFIG_PATH
-// environment variable.  A load or validation failure prints the error to
-// stderr and returns 1 without starting the HTTP server.
+// The config path resolves per EnvConfigPath and FlagConfigName. A load or
+// validation failure prints the error to stderr and returns 1 without
+// starting the HTTP server.
 //
-// ctx is the process-lifetime context (canceled by SIGTERM/SIGINT in main);
-// on cancellation the poll ticker stops and the server shuts down gracefully
-// so in-flight requests finish.
+// ctx is the process-lifetime context, canceled by SIGTERM/SIGINT in main.
+// On cancellation Run stops polling and shuts the server down per
+// shutdownTimeout.
 func Run(ctx context.Context, args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("traefik-scout", flag.ContinueOnError)
 	fs.SetOutput(stderr)
