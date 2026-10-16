@@ -516,6 +516,34 @@ downstreams:
 	}
 }
 
+// traffic_tls is distinct from tls: it configures the edge-to-downstream
+// traffic hop, not the API poll, so setting one must not populate the other.
+func TestLoad_DownstreamTrafficTLS(t *testing.T) {
+	path := writeYAML(t, `
+edge_entrypoints:
+  - websecure
+downstreams:
+  - name: primary
+    api_address: http://traefik:8080
+    traffic_address: https://traefik:443
+    allowed_entrypoints:
+      - websecure
+    traffic_tls:
+      insecure_skip_verify: true
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	d := cfg.Downstreams[0]
+	if d.TrafficTLS == nil || !d.TrafficTLS.InsecureSkipVerify {
+		t.Errorf("traffic_tls.insecure_skip_verify must be true, got %+v", d.TrafficTLS)
+	}
+	if d.TLS != nil {
+		t.Errorf("tls must stay unset, got %+v", d.TLS)
+	}
+}
+
 // auth.username set without auth.password must fail at startup.
 func TestLoad_AuthUsernameWithoutPassword_ReturnsError(t *testing.T) {
 	path := writeYAML(t, `

@@ -156,8 +156,9 @@ func sequencedDownstream(t *testing.T, responses []map[string]any) *httptest.Ser
 // httpEnvelope is the top-level shape we expect the handler to serve.
 type httpEnvelope struct {
 	HTTP struct {
-		Routers  map[string]json.RawMessage `json:"routers"`
-		Services map[string]json.RawMessage `json:"services"`
+		Routers           map[string]json.RawMessage `json:"routers"`
+		Services          map[string]json.RawMessage `json:"services"`
+		ServersTransports map[string]json.RawMessage `json:"serversTransports"`
 	} `json:"http"`
 }
 
@@ -254,6 +255,62 @@ func TestRefreshAndHandler_HappyPath(t *testing.T) {
 	}
 	if _, ok := env.HTTP.Services[valuePrimary]; !ok {
 		t.Errorf("expected service %q", valuePrimary)
+	}
+}
+
+// A downstream with traffic_tls.insecure_skip_verify gets its own
+// serversTransport, referenced only by its own service; other downstreams keep
+// Traefik's default verifying transport.
+func TestRefresh_TrafficTLSInsecureSkipVerify_ScopedServersTransport(t *testing.T) {
+	route := map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: valueHostA, fieldStatus: valueEnabled, fieldProvider: valueDocker}
+	ds1 := fakeDownstream(map[string]any{valueAppA: route})
+	defer ds1.Close()
+	ds2 := fakeDownstream(map[string]any{valueAppA: route})
+	defer ds2.Close()
+
+	cfg := multiConfig([]config.Downstream{
+		{Name: valueDownstreamHostA, APIAddress: ds1.URL, TrafficAddress: "https://host-a:443", AllowedEntrypoints: []string{valueWeb}, TrafficTLS: &config.TrafficTLS{InsecureSkipVerify: true}},
+		{Name: valueDownstreamHostB, APIAddress: ds2.URL, TrafficAddress: "https://host-b:443", AllowedEntrypoints: []string{valueWeb}},
+	})
+	a, err := app.New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	env := queryHandler(t, a.Handler(), cfg.ConfigPath)
+
+	type service struct {
+		LoadBalancer struct {
+			ServersTransport string `json:"serversTransport"`
+		} `json:"loadBalancer"`
+	}
+	var svcA, svcB service
+	if err := json.Unmarshal(env.HTTP.Services[valueDownstreamHostA], &svcA); err != nil {
+		t.Fatalf("decode service %s: %v", valueDownstreamHostA, err)
+	}
+	if err := json.Unmarshal(env.HTTP.Services[valueDownstreamHostB], &svcB); err != nil {
+		t.Fatalf("decode service %s: %v", valueDownstreamHostB, err)
+	}
+	if svcA.LoadBalancer.ServersTransport != valueDownstreamHostA {
+		t.Errorf("service %s serversTransport: got %q, want %q", valueDownstreamHostA, svcA.LoadBalancer.ServersTransport, valueDownstreamHostA)
+	}
+	if svcB.LoadBalancer.ServersTransport != "" {
+		t.Errorf("service %s must use the default transport, got %q", valueDownstreamHostB, svcB.LoadBalancer.ServersTransport)
+	}
+
+	if len(env.HTTP.ServersTransports) != 1 {
+		t.Fatalf("expected exactly one serversTransport, got %v", env.HTTP.ServersTransports)
+	}
+	var st struct {
+		InsecureSkipVerify bool `json:"insecureSkipVerify"`
+	}
+	if err := json.Unmarshal(env.HTTP.ServersTransports[valueDownstreamHostA], &st); err != nil {
+		t.Fatalf("decode serversTransport %s: %v", valueDownstreamHostA, err)
+	}
+	if !st.InsecureSkipVerify {
+		t.Errorf("serversTransport %s: insecureSkipVerify must be true", valueDownstreamHostA)
 	}
 }
 

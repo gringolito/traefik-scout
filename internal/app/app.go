@@ -243,8 +243,9 @@ type mergeResult struct {
 func newMergeResult() *mergeResult {
 	return &mergeResult{
 		out: &dynamic.HTTPConfiguration{
-			Routers:  make(map[string]*dynamic.Router),
-			Services: make(map[string]*dynamic.Service),
+			Routers:           make(map[string]*dynamic.Router),
+			Services:          make(map[string]*dynamic.Service),
+			ServersTransports: make(map[string]*dynamic.ServersTransport),
 		},
 		ruleContributors: make(map[string][]string),
 	}
@@ -469,12 +470,15 @@ func (a *App) mergeDownstream(ctx context.Context, ds config.Downstream, raw *ra
 
 	// One service per downstream; all its routers point here.
 	passHostHeader := true
-	result.out.Services[ds.Name] = &dynamic.Service{
-		LoadBalancer: &dynamic.ServersLoadBalancer{
-			Servers:        []dynamic.Server{{URL: ds.TrafficAddress}},
-			PassHostHeader: &passHostHeader,
-		},
+	lb := &dynamic.ServersLoadBalancer{
+		Servers:        []dynamic.Server{{URL: ds.TrafficAddress}},
+		PassHostHeader: &passHostHeader,
 	}
+	if ds.TrafficTLS != nil && ds.TrafficTLS.InsecureSkipVerify {
+		result.out.ServersTransports[ds.Name] = &dynamic.ServersTransport{InsecureSkipVerify: true}
+		lb.ServersTransport = ds.Name
+	}
+	result.out.Services[ds.Name] = &dynamic.Service{LoadBalancer: lb}
 }
 
 // isInternalProvider returns true when the router belongs to Traefik's

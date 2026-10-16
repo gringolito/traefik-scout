@@ -72,6 +72,7 @@ type Downstream struct {
 	AllowedEntrypoints []string
 	Auth               *Auth
 	TLS                *TLS
+	TrafficTLS         *TrafficTLS
 	PriorityOffset     int
 	StalenessLimit     time.Duration
 }
@@ -91,6 +92,12 @@ type TLS struct {
 	InsecureSkipVerify bool   `yaml:"insecure_skip_verify"`
 }
 
+// TrafficTLS controls how the edge Traefik connects to a downstream's
+// traffic_address when that address is HTTPS.
+type TrafficTLS struct {
+	InsecureSkipVerify bool `yaml:"insecure_skip_verify"`
+}
+
 // rawConfig mirrors Config with duration fields as plain strings so that
 // yaml.v3 decodes them without interpretation; we parse them ourselves to
 // produce error messages that name the offending field.
@@ -107,14 +114,15 @@ type rawConfig struct {
 }
 
 type rawDownstream struct {
-	Name               string   `yaml:"name"`
-	APIAddress         string   `yaml:"api_address"`
-	TrafficAddress     string   `yaml:"traffic_address"`
-	AllowedEntrypoints []string `yaml:"allowed_entrypoints"`
-	Auth               *Auth    `yaml:"auth"`
-	TLS                *TLS     `yaml:"tls"`
-	PriorityOffset     int      `yaml:"priority_offset"`
-	StalenessLimit     string   `yaml:"staleness_limit"`
+	Name               string      `yaml:"name"`
+	APIAddress         string      `yaml:"api_address"`
+	TrafficAddress     string      `yaml:"traffic_address"`
+	AllowedEntrypoints []string    `yaml:"allowed_entrypoints"`
+	Auth               *Auth       `yaml:"auth"`
+	TLS                *TLS        `yaml:"tls"`
+	TrafficTLS         *TrafficTLS `yaml:"traffic_tls"`
+	PriorityOffset     int         `yaml:"priority_offset"`
+	StalenessLimit     string      `yaml:"staleness_limit"`
 }
 
 func rawDefaults() *rawConfig {
@@ -184,6 +192,7 @@ func convert(r *rawConfig) (*Config, error) {
 			AllowedEntrypoints: rd.AllowedEntrypoints,
 			Auth:               rd.Auth,
 			TLS:                rd.TLS,
+			TrafficTLS:         rd.TrafficTLS,
 			PriorityOffset:     rd.PriorityOffset,
 			StalenessLimit:     sl,
 		}

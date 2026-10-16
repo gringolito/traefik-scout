@@ -63,8 +63,10 @@ downstreams:
 
     # Where user traffic is sent for this downstream's routers. Independent of
     # api_address: you typically poll the API on one port and route traffic on
-    # another. Required, absolute URL.
-    traffic_address: http://docker-host.lan:80
+    # another. Use https:// to keep the edge-to-downstream hop encrypted, for
+    # instance to target a downstream `websecure` entrypoint.
+    # Required, absolute URL.
+    traffic_address: https://docker-host.lan:443
 
     # Which of the downstream's own entrypoints are aggregated. Routers bound
     # only to other downstream entrypoints (host-local tooling, for instance)
@@ -105,6 +107,17 @@ downstreams:
       cert: /etc/traefik-scout/client.crt
       key: /etc/traefik-scout/client.key
       insecure_skip_verify: false
+
+    # Optional: TLS settings for the edge Traefik's connection to an https://
+    # traffic_address. Unlike `tls` above, this does not affect API polling.
+    #   insecure_skip_verify  encrypt the hop but skip certificate
+    #                         verification, for downstreams serving
+    #                         self-signed certificates while the edge owns
+    #                         the real one. Emitted as a serversTransport
+    #                         scoped to this downstream's service only.
+    #                         Default: false.
+    traffic_tls:
+      insecure_skip_verify: true
 
   # A second downstream: the minimal form. Only the required fields; every
   # global and optional value falls back to its default.
