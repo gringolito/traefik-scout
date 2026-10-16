@@ -2,16 +2,18 @@ edge_entrypoints:
   - websecure
 downstreams:
   - name: secondary
-    api_address: http://traefik-secondary:8080
-    traffic_address: http://traefik-secondary:80
+    api:
+      address: http://traefik-secondary:8080
+      tls:
+        ca: /etc/ssl/ca.crt
+        insecure_skip_verify: false
+      auth:
+        username: admin
+        password: secret
+    traffic:
+      address: http://traefik-secondary:80
     allowed_entrypoints:
       - web
       - websecure
     priority_offset: 10
     staleness_limit: 2m
-    auth:
-      username: admin
-      password: secret
-    tls:
-      ca: /etc/ssl/ca.crt
-      insecure_skip_verify: false

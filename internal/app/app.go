@@ -197,28 +197,29 @@ func New(cfg config.Config, opts ...Option) (*App, error) {
 // buildClient constructs an http.Client for one downstream.  When the
 // downstream carries no TLS config the default transport is used unchanged.
 func buildClient(ds config.Downstream, timeout time.Duration) (*http.Client, error) {
-	if ds.TLS == nil {
+	apiTLS := ds.API.TLS
+	if apiTLS == nil {
 		return &http.Client{Timeout: timeout}, nil
 	}
 
 	tlsCfg := &tls.Config{
-		InsecureSkipVerify: ds.TLS.InsecureSkipVerify, //nolint:gosec // operator-controlled setting
+		InsecureSkipVerify: apiTLS.InsecureSkipVerify, //nolint:gosec // operator-controlled setting
 	}
 
-	if ds.TLS.CA != "" {
-		caPEM, err := os.ReadFile(ds.TLS.CA)
+	if apiTLS.CA != "" {
+		caPEM, err := os.ReadFile(apiTLS.CA)
 		if err != nil {
-			return nil, fmt.Errorf("read CA cert %q: %w", ds.TLS.CA, err)
+			return nil, fmt.Errorf("read CA cert %q: %w", apiTLS.CA, err)
 		}
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(caPEM) {
-			return nil, fmt.Errorf("CA file %q: no valid PEM certificates found", ds.TLS.CA)
+			return nil, fmt.Errorf("CA file %q: no valid PEM certificates found", apiTLS.CA)
 		}
 		tlsCfg.RootCAs = pool
 	}
 
-	if ds.TLS.Cert != "" || ds.TLS.Key != "" {
-		cert, err := tls.LoadX509KeyPair(ds.TLS.Cert, ds.TLS.Key)
+	if apiTLS.Cert != "" || apiTLS.Key != "" {
+		cert, err := tls.LoadX509KeyPair(apiTLS.Cert, apiTLS.Key)
 		if err != nil {
 			return nil, fmt.Errorf("load client certificate: %w", err)
 		}
@@ -403,18 +404,18 @@ func (a *App) fetchWithRetry(ctx context.Context, ds config.Downstream) (*rawdat
 
 // fetchRawData fetches and decodes one downstream's /api/rawdata.
 func (a *App) fetchRawData(ctx context.Context, ds config.Downstream) (*rawdataResponse, error) {
-	url := ds.APIAddress + "/api/rawdata"
+	url := ds.API.Address + "/api/rawdata"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) //nolint:gosec // URL is operator config, not user input
 	if err != nil {
 		return nil, fmt.Errorf("build request for %s: %w", ds.Name, err)
 	}
 
-	if ds.Auth != nil {
-		for k, v := range ds.Auth.Headers {
+	if auth := ds.API.Auth; auth != nil {
+		for k, v := range auth.Headers {
 			req.Header.Set(k, v)
 		}
-		if ds.Auth.Username != "" {
-			req.SetBasicAuth(ds.Auth.Username, ds.Auth.Password)
+		if auth.Username != "" {
+			req.SetBasicAuth(auth.Username, auth.Password)
 		}
 	}
 
@@ -471,10 +472,10 @@ func (a *App) mergeDownstream(ctx context.Context, ds config.Downstream, raw *ra
 	// One service per downstream; all its routers point here.
 	passHostHeader := true
 	lb := &dynamic.ServersLoadBalancer{
-		Servers:        []dynamic.Server{{URL: ds.TrafficAddress}},
+		Servers:        []dynamic.Server{{URL: ds.Traffic.Address}},
 		PassHostHeader: &passHostHeader,
 	}
-	if ds.TrafficTLS != nil && ds.TrafficTLS.InsecureSkipVerify {
+	if ds.Traffic.TLS != nil && ds.Traffic.TLS.InsecureSkipVerify {
 		result.out.ServersTransports[ds.Name] = &dynamic.ServersTransport{InsecureSkipVerify: true}
 		lb.ServersTransport = ds.Name
 	}

@@ -119,8 +119,8 @@ func resilienceConfig(primaryURL, healthyURL string, staleness time.Duration) co
 		MaxResponseSize: 10 * 1024 * 1024,
 		EdgeEntrypoints: []string{valueWeb},
 		Downstreams: []config.Downstream{
-			{Name: "primary", APIAddress: primaryURL, TrafficAddress: "http://primary:80", AllowedEntrypoints: []string{valueWeb}, StalenessLimit: staleness},
-			{Name: "gpu", APIAddress: healthyURL, TrafficAddress: "http://gpu:80", AllowedEntrypoints: []string{valueWeb}},
+			{Name: "primary", API: config.API{Address: primaryURL}, Traffic: config.Traffic{Address: "http://primary:80"}, AllowedEntrypoints: []string{valueWeb}, StalenessLimit: staleness},
+			{Name: "gpu", API: config.API{Address: healthyURL}, Traffic: config.Traffic{Address: "http://gpu:80"}, AllowedEntrypoints: []string{valueWeb}},
 		},
 	}
 }
@@ -413,7 +413,7 @@ func TestRefresh_StalenessLimit_SingleDownstream_WithdrawalPublished(t *testing.
 		MaxResponseSize: 10 * 1024 * 1024,
 		EdgeEntrypoints: []string{valueWeb},
 		Downstreams: []config.Downstream{
-			{Name: "primary", APIAddress: ds.url(), TrafficAddress: "http://primary:80", AllowedEntrypoints: []string{valueWeb}, StalenessLimit: 5 * time.Second},
+			{Name: "primary", API: config.API{Address: ds.url()}, Traffic: config.Traffic{Address: "http://primary:80"}, AllowedEntrypoints: []string{valueWeb}, StalenessLimit: 5 * time.Second},
 		},
 	}
 	a := resilienceApp(t, cfg, clock) // success at T0

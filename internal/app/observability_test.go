@@ -318,8 +318,8 @@ func TestRefresh_LogsDebugPerDownstreamPerCycle(t *testing.T) {
 	dead.mode.Store(modeFail)
 
 	cfg := multiConfig([]config.Downstream{
-		{Name: valueDownstreamHostA, APIAddress: healthy.URL, TrafficAddress: valueTrafficHostA, AllowedEntrypoints: []string{valueWeb}},
-		{Name: valueDownstreamHostB, APIAddress: dead.url(), TrafficAddress: valueTrafficHostB, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valueDownstreamHostA, API: config.API{Address: healthy.URL}, Traffic: config.Traffic{Address: valueTrafficHostA}, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valueDownstreamHostB, API: config.API{Address: dead.url()}, Traffic: config.Traffic{Address: valueTrafficHostB}, AllowedEntrypoints: []string{valueWeb}},
 	})
 
 	var logBuf bytes.Buffer

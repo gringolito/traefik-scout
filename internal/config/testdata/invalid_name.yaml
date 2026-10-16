@@ -2,7 +2,9 @@ edge_entrypoints:
   - websecure
 downstreams:
   - name: "bad name!"
-    api_address: http://traefik-primary:8080
-    traffic_address: http://traefik-primary:80
+    api:
+      address: http://traefik-primary:8080
+    traffic:
+      address: http://traefik-primary:80
     allowed_entrypoints:
       - web

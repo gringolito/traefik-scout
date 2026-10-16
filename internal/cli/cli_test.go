@@ -182,7 +182,7 @@ func TestRun_CancelDuringInFlightRefresh(t *testing.T) {
 	ds, inFlight := slowDownstream(t)
 
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	cfgYAML := fmt.Sprintf("listen: %s\nconfig_path: %s\npoll_interval: 10ms\nrequest_timeout: 5s\nmax_response_size: 10485760\nlog_level: %s\nedge_entrypoints: [%s]\ndownstreams:\n  - name: %s\n    api_address: %s\n    traffic_address: %s\n    allowed_entrypoints: [%s]\n", testListen, testConfigPath, testLogLevel, entrypointWeb, testDownstream, ds.URL, ds.URL, entrypointWeb)
+	cfgYAML := fmt.Sprintf("listen: %s\nconfig_path: %s\npoll_interval: 10ms\nrequest_timeout: 5s\nmax_response_size: 10485760\nlog_level: %s\nedge_entrypoints: [%s]\ndownstreams:\n  - name: %s\n    api:\n      address: %s\n    traffic:\n      address: %s\n    allowed_entrypoints: [%s]\n", testListen, testConfigPath, testLogLevel, entrypointWeb, testDownstream, ds.URL, ds.URL, entrypointWeb)
 	if err := os.WriteFile(path, []byte(cfgYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +251,7 @@ func TestRun_InvalidYAMLContent_SurfacesValidationError(t *testing.T) {
 	if code != 1 {
 		t.Errorf("exit code: got %d, want 1", code)
 	}
-	if out := stderr.String(); !strings.Contains(out, "api_address") {
+	if out := stderr.String(); !strings.Contains(out, "api.address") {
 		t.Errorf("stderr must name the offending field, got %q", out)
 	}
 }
@@ -283,7 +283,7 @@ func (s *safeStderr) String() string {
 func TestRun_ValidConfig_ServesAndShutsDownCleanly(t *testing.T) {
 	ds := fakeDownstream(t, whoamiRouter())
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	cfgYAML := fmt.Sprintf("listen: 127.0.0.1:0\npoll_interval: 50ms\nlog_level: info\nedge_entrypoints: [%s]\ndownstreams:\n  - name: primary\n    api_address: %s\n    traffic_address: %s\n    allowed_entrypoints: [%s]\n", entrypointWeb, ds.URL, ds.URL, entrypointWeb)
+	cfgYAML := fmt.Sprintf("listen: 127.0.0.1:0\npoll_interval: 50ms\nlog_level: info\nedge_entrypoints: [%s]\ndownstreams:\n  - name: primary\n    api:\n      address: %s\n    traffic:\n      address: %s\n    allowed_entrypoints: [%s]\n", entrypointWeb, ds.URL, ds.URL, entrypointWeb)
 	if err := os.WriteFile(path, []byte(cfgYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +362,7 @@ func TestRun_InFlightRequestCompletesDuringShutdown(t *testing.T) {
 	// logged, not fatal, and the server must still serve. poll_interval of 1h
 	// effectively disables periodic refreshes so the poller cannot interfere
 	// with the in-flight request.
-	cfgYAML := fmt.Sprintf("listen: %s\nconfig_path: %s\npoll_interval: 1h\nrequest_timeout: 5s\nmax_response_size: 10485760\nlog_level: %s\nedge_entrypoints: [%s]\ndownstreams:\n  - name: %s\n    api_address: http://127.0.0.1:1\n    traffic_address: http://127.0.0.1:80\n    allowed_entrypoints: [%s]\n", testListen, testConfigPath, testLogLevel, entrypointWeb, testDownstream, entrypointWeb)
+	cfgYAML := fmt.Sprintf("listen: %s\nconfig_path: %s\npoll_interval: 1h\nrequest_timeout: 5s\nmax_response_size: 10485760\nlog_level: %s\nedge_entrypoints: [%s]\ndownstreams:\n  - name: %s\n    api:\n      address: http://127.0.0.1:1\n    traffic:\n      address: http://127.0.0.1:80\n    allowed_entrypoints: [%s]\n", testListen, testConfigPath, testLogLevel, entrypointWeb, testDownstream, entrypointWeb)
 	if err := os.WriteFile(path, []byte(cfgYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -461,7 +461,7 @@ func TestRun_ServesMergedConfigAndHealth(t *testing.T) {
 	ds := fakeDownstream(t, whoamiRouter())
 
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	cfgYAML := fmt.Sprintf("listen: %s\nconfig_path: %s\npoll_interval: %s\nrequest_timeout: 5s\nmax_response_size: 10485760\nlog_level: %s\nedge_entrypoints: [%s]\ndownstreams:\n  - name: %s\n    api_address: %s\n    traffic_address: %s\n    allowed_entrypoints: [%s]\n", testListen, testConfigPath, testInitialPoll, testLogLevel, entrypointWeb, testDownstream, ds.URL, ds.URL, entrypointWeb)
+	cfgYAML := fmt.Sprintf("listen: %s\nconfig_path: %s\npoll_interval: %s\nrequest_timeout: 5s\nmax_response_size: 10485760\nlog_level: %s\nedge_entrypoints: [%s]\ndownstreams:\n  - name: %s\n    api:\n      address: %s\n    traffic:\n      address: %s\n    allowed_entrypoints: [%s]\n", testListen, testConfigPath, testInitialPoll, testLogLevel, entrypointWeb, testDownstream, ds.URL, ds.URL, entrypointWeb)
 	if err := os.WriteFile(path, []byte(cfgYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -531,7 +531,7 @@ func TestRun_ServesMergedConfigAndHealth(t *testing.T) {
 func TestRun_DebugLevelEmitsPerDownstreamPollLines(t *testing.T) {
 	ds := fakeDownstream(t, whoamiRouter())
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	cfgYAML := fmt.Sprintf("listen: %s\npoll_interval: 20ms\nlog_level: debug\nedge_entrypoints: [%s]\ndownstreams:\n  - name: primary\n    api_address: %s\n    traffic_address: %s\n    allowed_entrypoints: [%s]\n", testListen, entrypointWeb, ds.URL, ds.URL, entrypointWeb)
+	cfgYAML := fmt.Sprintf("listen: %s\npoll_interval: 20ms\nlog_level: debug\nedge_entrypoints: [%s]\ndownstreams:\n  - name: primary\n    api:\n      address: %s\n    traffic:\n      address: %s\n    allowed_entrypoints: [%s]\n", testListen, entrypointWeb, ds.URL, ds.URL, entrypointWeb)
 	if err := os.WriteFile(path, []byte(cfgYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -559,7 +559,7 @@ func TestRun_DebugLevelEmitsPerDownstreamPollLines(t *testing.T) {
 func TestRun_ErrorLevelSuppressesInfoAndDebugLines(t *testing.T) {
 	ds := fakeDownstream(t, whoamiRouter())
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	cfgYAML := fmt.Sprintf("listen: %s\npoll_interval: 20ms\nlog_level: error\nedge_entrypoints: [%s]\ndownstreams:\n  - name: primary\n    api_address: %s\n    traffic_address: %s\n    allowed_entrypoints: [%s]\n", testListen, entrypointWeb, ds.URL, ds.URL, entrypointWeb)
+	cfgYAML := fmt.Sprintf("listen: %s\npoll_interval: 20ms\nlog_level: error\nedge_entrypoints: [%s]\ndownstreams:\n  - name: primary\n    api:\n      address: %s\n    traffic:\n      address: %s\n    allowed_entrypoints: [%s]\n", testListen, entrypointWeb, ds.URL, ds.URL, entrypointWeb)
 	if err := os.WriteFile(path, []byte(cfgYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -588,7 +588,7 @@ func TestRun_ErrorLevelSuppressesInfoAndDebugLines(t *testing.T) {
 func TestRun_JSONFormatEmitsJSONLines(t *testing.T) {
 	ds := fakeDownstream(t, whoamiRouter())
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	cfgYAML := fmt.Sprintf("listen: %s\npoll_interval: 20ms\nlog_level: debug\nlog_format: json\nedge_entrypoints: [%s]\ndownstreams:\n  - name: primary\n    api_address: %s\n    traffic_address: %s\n    allowed_entrypoints: [%s]\n", testListen, entrypointWeb, ds.URL, ds.URL, entrypointWeb)
+	cfgYAML := fmt.Sprintf("listen: %s\npoll_interval: 20ms\nlog_level: debug\nlog_format: json\nedge_entrypoints: [%s]\ndownstreams:\n  - name: primary\n    api:\n      address: %s\n    traffic:\n      address: %s\n    allowed_entrypoints: [%s]\n", testListen, entrypointWeb, ds.URL, ds.URL, entrypointWeb)
 	if err := os.WriteFile(path, []byte(cfgYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -634,7 +634,7 @@ func TestRun_JSONFormatEmitsJSONLines(t *testing.T) {
 func TestRun_LogsDoNotContainSecrets(t *testing.T) {
 	ds := fakeDownstream(t, whoamiRouter())
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	cfgYAML := fmt.Sprintf("listen: %s\npoll_interval: 20ms\nlog_level: debug\nedge_entrypoints: [%s]\ndownstreams:\n  - name: primary\n    api_address: %s\n    traffic_address: %s\n    allowed_entrypoints: [%s]\n    auth:\n      username: alice\n      password: s3cret-hunter2\n", testListen, entrypointWeb, ds.URL, ds.URL, entrypointWeb)
+	cfgYAML := fmt.Sprintf("listen: %s\npoll_interval: 20ms\nlog_level: debug\nedge_entrypoints: [%s]\ndownstreams:\n  - name: primary\n    api:\n      address: %s\n      auth:\n        username: alice\n        password: s3cret-hunter2\n    traffic:\n      address: %s\n    allowed_entrypoints: [%s]\n", testListen, entrypointWeb, ds.URL, ds.URL, entrypointWeb)
 	if err := os.WriteFile(path, []byte(cfgYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
