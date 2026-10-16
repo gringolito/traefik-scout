@@ -83,8 +83,8 @@ func testConfig(apiURL, trafficURL string) config.Config {
 		Downstreams: []config.Downstream{
 			{
 				Name:               valuePrimary,
-				APIAddress:         apiURL,
-				TrafficAddress:     trafficURL,
+				API:                config.API{Address: apiURL},
+				Traffic:            config.Traffic{Address: trafficURL},
 				AllowedEntrypoints: []string{valueWeb},
 			},
 		},
@@ -156,8 +156,9 @@ func sequencedDownstream(t *testing.T, responses []map[string]any) *httptest.Ser
 // httpEnvelope is the top-level shape we expect the handler to serve.
 type httpEnvelope struct {
 	HTTP struct {
-		Routers  map[string]json.RawMessage `json:"routers"`
-		Services map[string]json.RawMessage `json:"services"`
+		Routers           map[string]json.RawMessage `json:"routers"`
+		Services          map[string]json.RawMessage `json:"services"`
+		ServersTransports map[string]json.RawMessage `json:"serversTransports"`
 	} `json:"http"`
 }
 
@@ -254,6 +255,62 @@ func TestRefreshAndHandler_HappyPath(t *testing.T) {
 	}
 	if _, ok := env.HTTP.Services[valuePrimary]; !ok {
 		t.Errorf("expected service %q", valuePrimary)
+	}
+}
+
+// A downstream with traffic.tls.insecure_skip_verify gets its own
+// serversTransport, referenced only by its own service; other downstreams keep
+// Traefik's default verifying transport.
+func TestRefresh_TrafficTLSInsecureSkipVerify_ScopedServersTransport(t *testing.T) {
+	route := map[string]any{fieldEntryPoints: []string{valueWeb}, fieldRule: valueHostA, fieldStatus: valueEnabled, fieldProvider: valueDocker}
+	ds1 := fakeDownstream(map[string]any{valueAppA: route})
+	defer ds1.Close()
+	ds2 := fakeDownstream(map[string]any{valueAppA: route})
+	defer ds2.Close()
+
+	cfg := multiConfig([]config.Downstream{
+		{Name: valueDownstreamHostA, API: config.API{Address: ds1.URL}, Traffic: config.Traffic{Address: "https://host-a:443", TLS: &config.TrafficTLS{InsecureSkipVerify: true}}, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valueDownstreamHostB, API: config.API{Address: ds2.URL}, Traffic: config.Traffic{Address: "https://host-b:443"}, AllowedEntrypoints: []string{valueWeb}},
+	})
+	a, err := app.New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	env := queryHandler(t, a.Handler(), cfg.ConfigPath)
+
+	type service struct {
+		LoadBalancer struct {
+			ServersTransport string `json:"serversTransport"`
+		} `json:"loadBalancer"`
+	}
+	var svcA, svcB service
+	if err := json.Unmarshal(env.HTTP.Services[valueDownstreamHostA], &svcA); err != nil {
+		t.Fatalf("decode service %s: %v", valueDownstreamHostA, err)
+	}
+	if err := json.Unmarshal(env.HTTP.Services[valueDownstreamHostB], &svcB); err != nil {
+		t.Fatalf("decode service %s: %v", valueDownstreamHostB, err)
+	}
+	if svcA.LoadBalancer.ServersTransport != valueDownstreamHostA {
+		t.Errorf("service %s serversTransport: got %q, want %q", valueDownstreamHostA, svcA.LoadBalancer.ServersTransport, valueDownstreamHostA)
+	}
+	if svcB.LoadBalancer.ServersTransport != "" {
+		t.Errorf("service %s must use the default transport, got %q", valueDownstreamHostB, svcB.LoadBalancer.ServersTransport)
+	}
+
+	if len(env.HTTP.ServersTransports) != 1 {
+		t.Fatalf("expected exactly one serversTransport, got %v", env.HTTP.ServersTransports)
+	}
+	var st struct {
+		InsecureSkipVerify bool `json:"insecureSkipVerify"`
+	}
+	if err := json.Unmarshal(env.HTTP.ServersTransports[valueDownstreamHostA], &st); err != nil {
+		t.Fatalf("decode serversTransport %s: %v", valueDownstreamHostA, err)
+	}
+	if !st.InsecureSkipVerify {
+		t.Errorf("serversTransport %s: insecureSkipVerify must be true", valueDownstreamHostA)
 	}
 }
 
@@ -542,9 +599,9 @@ func TestRefresh_ThreeDownstreams_AllRoutesAppear(t *testing.T) {
 	defer ds3.Close()
 
 	cfg := multiConfig([]config.Downstream{
-		{Name: valuePrimary, APIAddress: ds1.URL, TrafficAddress: valueTrafficPrimary, AllowedEntrypoints: []string{valueWeb}},
-		{Name: valueGpu, APIAddress: ds2.URL, TrafficAddress: valueTrafficGpu, AllowedEntrypoints: []string{valueWeb}},
-		{Name: "k8s", APIAddress: ds3.URL, TrafficAddress: "http://k8s:80", AllowedEntrypoints: []string{valueWeb}},
+		{Name: valuePrimary, API: config.API{Address: ds1.URL}, Traffic: config.Traffic{Address: valueTrafficPrimary}, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valueGpu, API: config.API{Address: ds2.URL}, Traffic: config.Traffic{Address: valueTrafficGpu}, AllowedEntrypoints: []string{valueWeb}},
+		{Name: "k8s", API: config.API{Address: ds3.URL}, Traffic: config.Traffic{Address: "http://k8s:80"}, AllowedEntrypoints: []string{valueWeb}},
 	})
 
 	a, err := app.New(cfg)
@@ -577,8 +634,8 @@ func TestRefresh_RouterNameCollision_BothPrefixed(t *testing.T) {
 	defer ds2.Close()
 
 	cfg := multiConfig([]config.Downstream{
-		{Name: valueDownstreamHostA, APIAddress: ds1.URL, TrafficAddress: valueTrafficHostA, AllowedEntrypoints: []string{valueWeb}},
-		{Name: valueDownstreamHostB, APIAddress: ds2.URL, TrafficAddress: valueTrafficHostB, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valueDownstreamHostA, API: config.API{Address: ds1.URL}, Traffic: config.Traffic{Address: valueTrafficHostA}, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valueDownstreamHostB, API: config.API{Address: ds2.URL}, Traffic: config.Traffic{Address: valueTrafficHostB}, AllowedEntrypoints: []string{valueWeb}},
 	})
 
 	a, err := app.New(cfg)
@@ -610,7 +667,7 @@ func TestRefresh_PriorityOffset(t *testing.T) {
 	defer ds.Close()
 
 	cfg := multiConfig([]config.Downstream{
-		{Name: "edge", APIAddress: ds.URL, TrafficAddress: "http://edge:80", AllowedEntrypoints: []string{valueWeb}, PriorityOffset: 100},
+		{Name: "edge", API: config.API{Address: ds.URL}, Traffic: config.Traffic{Address: "http://edge:80"}, AllowedEntrypoints: []string{valueWeb}, PriorityOffset: 100},
 	})
 
 	a, err := app.New(cfg)
@@ -655,8 +712,8 @@ func TestRefresh_IdenticalRule_WarnAndServe(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
 	cfg := multiConfig([]config.Downstream{
-		{Name: valueDownstreamHostA, APIAddress: ds1.URL, TrafficAddress: valueTrafficHostA, AllowedEntrypoints: []string{valueWeb}},
-		{Name: valueDownstreamHostB, APIAddress: ds2.URL, TrafficAddress: valueTrafficHostB, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valueDownstreamHostA, API: config.API{Address: ds1.URL}, Traffic: config.Traffic{Address: valueTrafficHostA}, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valueDownstreamHostB, API: config.API{Address: ds2.URL}, Traffic: config.Traffic{Address: valueTrafficHostB}, AllowedEntrypoints: []string{valueWeb}},
 	})
 
 	a, err := app.New(cfg, app.WithLogger(logger))
@@ -701,8 +758,8 @@ func TestRefresh_FailingDownstream_HealthyDownstreamsStillServed(t *testing.T) {
 	defer live.Close()
 
 	cfg := multiConfig([]config.Downstream{
-		{Name: "dead", APIAddress: dead.URL, TrafficAddress: "http://dead:80", AllowedEntrypoints: []string{valueWeb}},
-		{Name: "live", APIAddress: live.URL, TrafficAddress: "http://live:80", AllowedEntrypoints: []string{valueWeb}},
+		{Name: "dead", API: config.API{Address: dead.URL}, Traffic: config.Traffic{Address: "http://dead:80"}, AllowedEntrypoints: []string{valueWeb}},
+		{Name: "live", API: config.API{Address: live.URL}, Traffic: config.Traffic{Address: "http://live:80"}, AllowedEntrypoints: []string{valueWeb}},
 	})
 
 	a, err := app.New(cfg, app.WithSleep(func(time.Duration) {}))
@@ -738,8 +795,8 @@ func TestRefresh_FailingDownstream_LastGoodRoutesRetained(t *testing.T) {
 	})
 
 	cfg := multiConfig([]config.Downstream{
-		{Name: valuePrimary, APIAddress: primary.URL, TrafficAddress: valueTrafficPrimary, AllowedEntrypoints: []string{valueWeb}},
-		{Name: valueGpu, APIAddress: gpu.URL, TrafficAddress: valueTrafficGpu, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valuePrimary, API: config.API{Address: primary.URL}, Traffic: config.Traffic{Address: valueTrafficPrimary}, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valueGpu, API: config.API{Address: gpu.URL}, Traffic: config.Traffic{Address: valueTrafficGpu}, AllowedEntrypoints: []string{valueWeb}},
 	})
 
 	a, err := app.New(cfg, app.WithSleep(func(time.Duration) {}))
@@ -782,8 +839,8 @@ func TestRefresh_AllDownstreamsFail_LastGoodRoutesRetained(t *testing.T) {
 	})
 
 	cfg := multiConfig([]config.Downstream{
-		{Name: valuePrimary, APIAddress: primary.URL, TrafficAddress: valueTrafficPrimary, AllowedEntrypoints: []string{valueWeb}},
-		{Name: valueGpu, APIAddress: gpu.URL, TrafficAddress: valueTrafficGpu, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valuePrimary, API: config.API{Address: primary.URL}, Traffic: config.Traffic{Address: valueTrafficPrimary}, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valueGpu, API: config.API{Address: gpu.URL}, Traffic: config.Traffic{Address: valueTrafficGpu}, AllowedEntrypoints: []string{valueWeb}},
 	})
 
 	a, err := app.New(cfg, app.WithSleep(func(time.Duration) {}))
@@ -974,7 +1031,7 @@ func TestRefresh_BearerToken_SendsAuthorizationHeader(t *testing.T) {
 		}
 	})
 	cfg := testConfig(ds.URL, valueTrafficExample)
-	cfg.Downstreams[0].Auth = &config.Auth{Headers: map[string]string{"Authorization": "Bearer " + token}}
+	cfg.Downstreams[0].API.Auth = &config.Auth{Headers: map[string]string{"Authorization": "Bearer " + token}}
 	refreshWith(t, cfg)
 }
 
@@ -993,7 +1050,7 @@ func TestRefresh_APIKeyHeader_SendsCustomHeader(t *testing.T) {
 		}
 	})
 	cfg := testConfig(ds.URL, valueTrafficExample)
-	cfg.Downstreams[0].Auth = &config.Auth{Headers: map[string]string{headerName: headerVal}}
+	cfg.Downstreams[0].API.Auth = &config.Auth{Headers: map[string]string{headerName: headerVal}}
 	refreshWith(t, cfg)
 }
 
@@ -1018,7 +1075,7 @@ func TestRefresh_BasicAuth_SendsCredentials(t *testing.T) {
 		}
 	})
 	cfg := testConfig(ds.URL, valueTrafficExample)
-	cfg.Downstreams[0].Auth = &config.Auth{Username: wantUser, Password: wantPass}
+	cfg.Downstreams[0].API.Auth = &config.Auth{Username: wantUser, Password: wantPass}
 	refreshWith(t, cfg)
 }
 
@@ -1034,7 +1091,7 @@ func TestRefresh_CustomCA_PollsHTTPSServer(t *testing.T) {
 
 	caPath := writePEMFile(t, ca.certPEM)
 	cfg := testConfig(ds.URL, valueTrafficExample)
-	cfg.Downstreams[0].TLS = &config.TLS{CA: caPath}
+	cfg.Downstreams[0].API.TLS = &config.APITLS{CA: caPath}
 	refreshWith(t, cfg)
 }
 
@@ -1048,7 +1105,7 @@ func TestRefresh_InsecureSkipVerify_PollsSelfSignedServer(t *testing.T) {
 	// cert, which no system trust store recognises.
 	ds := tlsDownstreamWith(t, &tls.Config{})
 	cfg := testConfig(ds.URL, valueTrafficExample)
-	cfg.Downstreams[0].TLS = &config.TLS{InsecureSkipVerify: true}
+	cfg.Downstreams[0].API.TLS = &config.APITLS{InsecureSkipVerify: true}
 	refreshWith(t, cfg)
 }
 
@@ -1075,7 +1132,7 @@ func TestRefresh_ClientCert_PresentedDuringTLS(t *testing.T) {
 	keyPath := writePEMFile(t, clientKeyPEM)
 
 	cfg := testConfig(ds.URL, valueTrafficExample)
-	cfg.Downstreams[0].TLS = &config.TLS{CA: writePEMFile(t, ca.certPEM), Cert: certPath, Key: keyPath}
+	cfg.Downstreams[0].API.TLS = &config.APITLS{CA: writePEMFile(t, ca.certPEM), Cert: certPath, Key: keyPath}
 	refreshWith(t, cfg)
 }
 
@@ -1106,8 +1163,8 @@ func TestRefresh_MalformedJSON_LastGoodRetained(t *testing.T) {
 	defer live.Close()
 
 	cfg := multiConfig([]config.Downstream{
-		{Name: valuePrimary, APIAddress: bad.URL, TrafficAddress: valueTrafficPrimary, AllowedEntrypoints: []string{valueWeb}},
-		{Name: valueGpu, APIAddress: live.URL, TrafficAddress: valueTrafficGpu, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valuePrimary, API: config.API{Address: bad.URL}, Traffic: config.Traffic{Address: valueTrafficPrimary}, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valueGpu, API: config.API{Address: live.URL}, Traffic: config.Traffic{Address: valueTrafficGpu}, AllowedEntrypoints: []string{valueWeb}},
 	})
 
 	a, err := app.New(cfg, app.WithSleep(func(time.Duration) {}))
@@ -1158,8 +1215,8 @@ func TestRefresh_OversizedResponse_LastGoodRetained(t *testing.T) {
 	defer live.Close()
 
 	cfg := multiConfig([]config.Downstream{
-		{Name: valuePrimary, APIAddress: srv.URL, TrafficAddress: valueTrafficPrimary, AllowedEntrypoints: []string{valueWeb}},
-		{Name: valueGpu, APIAddress: live.URL, TrafficAddress: valueTrafficGpu, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valuePrimary, API: config.API{Address: srv.URL}, Traffic: config.Traffic{Address: valueTrafficPrimary}, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valueGpu, API: config.API{Address: live.URL}, Traffic: config.Traffic{Address: valueTrafficGpu}, AllowedEntrypoints: []string{valueWeb}},
 	})
 	// Small enough to truncate the cycle-2 body mid-object, large enough for cycle 1.
 	cfg.MaxResponseSize = 1024
@@ -1230,8 +1287,8 @@ func TestRefresh_ZeroRouters_ValidEmptyResult(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
 	cfg := multiConfig([]config.Downstream{
-		{Name: valuePrimary, APIAddress: primary.URL, TrafficAddress: valueTrafficPrimary, AllowedEntrypoints: []string{valueWeb}},
-		{Name: valueGpu, APIAddress: live.URL, TrafficAddress: valueTrafficGpu, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valuePrimary, API: config.API{Address: primary.URL}, Traffic: config.Traffic{Address: valueTrafficPrimary}, AllowedEntrypoints: []string{valueWeb}},
+		{Name: valueGpu, API: config.API{Address: live.URL}, Traffic: config.Traffic{Address: valueTrafficGpu}, AllowedEntrypoints: []string{valueWeb}},
 	})
 
 	a, err := app.New(cfg, app.WithLogger(logger))

@@ -67,13 +67,18 @@ type Config struct {
 // Downstream describes one upstream Traefik instance.
 type Downstream struct {
 	Name               string
-	APIAddress         string
-	TrafficAddress     string
+	API                API
+	Traffic            Traffic
 	AllowedEntrypoints []string
-	Auth               *Auth
-	TLS                *TLS
 	PriorityOffset     int
 	StalenessLimit     time.Duration
+}
+
+// API describes how traefik-scout polls a downstream's Traefik API.
+type API struct {
+	Address string  `yaml:"address"`
+	Auth    *Auth   `yaml:"auth"`
+	TLS     *APITLS `yaml:"tls"`
 }
 
 // Auth holds credentials for accessing a downstream's Traefik API.
@@ -83,12 +88,26 @@ type Auth struct {
 	Headers  map[string]string `yaml:"headers"`
 }
 
-// TLS holds TLS configuration for connecting to a downstream's Traefik API.
-type TLS struct {
+// APITLS holds TLS configuration for connecting to a downstream's Traefik API.
+type APITLS struct {
 	CA                 string `yaml:"ca"`
 	Cert               string `yaml:"cert"`
 	Key                string `yaml:"key"`
 	InsecureSkipVerify bool   `yaml:"insecure_skip_verify"`
+}
+
+// Traffic describes how the edge Traefik forwards user traffic to a
+// downstream. Unlike API, it is not used by traefik-scout itself but emitted
+// into the served dynamic configuration.
+type Traffic struct {
+	Address string      `yaml:"address"`
+	TLS     *TrafficTLS `yaml:"tls"`
+}
+
+// TrafficTLS controls how the edge Traefik connects to an HTTPS
+// traffic.address.
+type TrafficTLS struct {
+	InsecureSkipVerify bool `yaml:"insecure_skip_verify"`
 }
 
 // rawConfig mirrors Config with duration fields as plain strings so that
@@ -108,11 +127,9 @@ type rawConfig struct {
 
 type rawDownstream struct {
 	Name               string   `yaml:"name"`
-	APIAddress         string   `yaml:"api_address"`
-	TrafficAddress     string   `yaml:"traffic_address"`
+	API                API      `yaml:"api"`
+	Traffic            Traffic  `yaml:"traffic"`
 	AllowedEntrypoints []string `yaml:"allowed_entrypoints"`
-	Auth               *Auth    `yaml:"auth"`
-	TLS                *TLS     `yaml:"tls"`
 	PriorityOffset     int      `yaml:"priority_offset"`
 	StalenessLimit     string   `yaml:"staleness_limit"`
 }
@@ -179,11 +196,9 @@ func convert(r *rawConfig) (*Config, error) {
 		}
 		downstreams[i] = Downstream{
 			Name:               rd.Name,
-			APIAddress:         rd.APIAddress,
-			TrafficAddress:     rd.TrafficAddress,
+			API:                rd.API,
+			Traffic:            rd.Traffic,
 			AllowedEntrypoints: rd.AllowedEntrypoints,
-			Auth:               rd.Auth,
-			TLS:                rd.TLS,
 			PriorityOffset:     rd.PriorityOffset,
 			StalenessLimit:     sl,
 		}
@@ -249,26 +264,26 @@ func validate(cfg *Config) error {
 		if !validName.MatchString(d.Name) {
 			return fmt.Errorf("downstream[%d]: name %q contains invalid characters (allowed: a-z, A-Z, 0-9, _, -)", i, d.Name)
 		}
-		if err := requireAbsoluteURL("api_address", d.APIAddress); err != nil {
+		if err := requireAbsoluteURL("api.address", d.API.Address); err != nil {
 			return fmt.Errorf("downstream[%d] (%q): %w", i, d.Name, err)
 		}
-		if err := requireAbsoluteURL("traffic_address", d.TrafficAddress); err != nil {
+		if err := requireAbsoluteURL("traffic.address", d.Traffic.Address); err != nil {
 			return fmt.Errorf("downstream[%d] (%q): %w", i, d.Name, err)
 		}
 		if len(d.AllowedEntrypoints) == 0 {
 			return fmt.Errorf("downstream[%d] (%q): allowed_entrypoints: at least one entrypoint is required; an empty list must not be treated as \"publish all\"", i, d.Name)
 		}
-		if d.Auth != nil {
-			if (d.Auth.Username == "") != (d.Auth.Password == "") {
-				return fmt.Errorf("downstream[%d] (%q): auth.username and auth.password must both be set together", i, d.Name)
+		if auth := d.API.Auth; auth != nil {
+			if (auth.Username == "") != (auth.Password == "") {
+				return fmt.Errorf("downstream[%d] (%q): api.auth.username and api.auth.password must both be set together", i, d.Name)
 			}
-			if len(d.Auth.Headers) > 0 && d.Auth.Username != "" {
-				return fmt.Errorf("downstream[%d] (%q): auth.headers and auth.username/password are mutually exclusive", i, d.Name)
+			if len(auth.Headers) > 0 && auth.Username != "" {
+				return fmt.Errorf("downstream[%d] (%q): api.auth.headers and api.auth.username/password are mutually exclusive", i, d.Name)
 			}
 		}
-		if d.TLS != nil {
-			if (d.TLS.Cert == "") != (d.TLS.Key == "") {
-				return fmt.Errorf("downstream[%d] (%q): tls.cert and tls.key must both be set together", i, d.Name)
+		if apiTLS := d.API.TLS; apiTLS != nil {
+			if (apiTLS.Cert == "") != (apiTLS.Key == "") {
+				return fmt.Errorf("downstream[%d] (%q): api.tls.cert and api.tls.key must both be set together", i, d.Name)
 			}
 		}
 		if prev, ok := seen[d.Name]; ok {

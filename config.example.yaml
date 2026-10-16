@@ -56,15 +56,55 @@ downstreams:
   # Required, must be unique.
   - name: docker-host
 
-    # Base URL of the downstream Traefik API that /api/rawdata is polled on.
-    # This is the traefik entrypoint, or an explicitly exposed api@internal
-    # router, never the Docker socket. Required, absolute URL.
-    api_address: http://docker-host.lan:8080
+    # How traefik-scout polls the downstream Traefik API for its routers.
+    api:
+      # Base URL that /api/rawdata is polled on. This is the traefik
+      # entrypoint, or an explicitly exposed api@internal router, never the
+      # Docker socket. Required, absolute URL.
+      address: http://docker-host.lan:8080
 
-    # Where user traffic is sent for this downstream's routers. Independent of
-    # api_address: you typically poll the API on one port and route traffic on
-    # another. Required, absolute URL.
-    traffic_address: http://docker-host.lan:80
+      # Optional: credentials for the API. Exactly one of:
+      #   - static headers (bearer tokens, API keys), or
+      #   - username + password (HTTP basic auth).
+      # Setting both, or only one of username/password, fails validation.
+      auth:
+        headers:
+          Authorization: "Bearer change-me"
+
+      # Optional: TLS settings for polling the API over HTTPS. Files are read
+      # by traefik-scout.
+      #   ca                    path to a PEM CA bundle for a private/self-signed
+      #                         downstream certificate. Default: system roots.
+      #   cert / key            client certificate and key for mTLS. Must be
+      #                         set together.
+      #   insecure_skip_verify  skip certificate verification. Escape hatch
+      #                         only. Default: false.
+      tls:
+        ca: /etc/traefik-scout/downstream-ca.crt
+        cert: /etc/traefik-scout/client.crt
+        key: /etc/traefik-scout/client.key
+        insecure_skip_verify: false
+
+    # How the edge Traefik forwards user traffic to this downstream. Emitted
+    # into the served configuration; traefik-scout never connects here itself.
+    traffic:
+      # Where user traffic is sent for this downstream's routers. Independent
+      # of api.address: you typically poll the API on one port and route
+      # traffic on another. Use https:// to keep the edge-to-downstream hop
+      # encrypted, for instance to target a downstream `websecure` entrypoint.
+      # Required, absolute URL.
+      address: https://docker-host.lan:443
+
+      # Optional: TLS settings for the edge's connection to an https://
+      # address.
+      #   insecure_skip_verify  encrypt the hop but skip certificate
+      #                         verification, for downstreams serving
+      #                         self-signed certificates while the edge owns
+      #                         the real one. Emitted as a serversTransport
+      #                         scoped to this downstream's service only.
+      #                         Default: false.
+      tls:
+        insecure_skip_verify: true
 
     # Which of the downstream's own entrypoints are aggregated. Routers bound
     # only to other downstream entrypoints (host-local tooling, for instance)
@@ -85,32 +125,13 @@ downstreams:
     # Default: disabled (routes are served indefinitely)
     staleness_limit: 5m
 
-    # Optional: credentials for the downstream API. Exactly one of:
-    #   - static headers (bearer tokens, API keys), or
-    #   - username + password (HTTP basic auth).
-    # Setting both, or only one of username/password, fails validation.
-    auth:
-      headers:
-        Authorization: "Bearer change-me"
-
-    # Optional: TLS settings for connecting to the downstream API over HTTPS.
-    #   ca                    path to a PEM CA bundle for a private/self-signed
-    #                         downstream certificate. Default: system roots.
-    #   cert / key            client certificate and key for mTLS. Must be set
-    #                         together.
-    #   insecure_skip_verify  skip certificate verification. Escape hatch only.
-    #                         Default: false.
-    tls:
-      ca: /etc/traefik-scout/downstream-ca.crt
-      cert: /etc/traefik-scout/client.crt
-      key: /etc/traefik-scout/client.key
-      insecure_skip_verify: false
-
   # A second downstream: the minimal form. Only the required fields; every
   # global and optional value falls back to its default.
   - name: gpu-host
-    api_address: http://gpu-host.lan:8080
-    traffic_address: http://gpu-host.lan:80
+    api:
+      address: http://gpu-host.lan:8080
+    traffic:
+      address: http://gpu-host.lan:80
     allowed_entrypoints:
       - web
       - websecure

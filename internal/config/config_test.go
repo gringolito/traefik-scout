@@ -50,11 +50,11 @@ func TestLoad_MinimalValid(t *testing.T) {
 	if d.Name != "primary" {
 		t.Errorf("downstream name: got %q, want %q", d.Name, "primary")
 	}
-	if d.APIAddress != "http://traefik-primary:8080" {
-		t.Errorf("downstream api_address: got %q", d.APIAddress)
+	if d.API.Address != "http://traefik-primary:8080" {
+		t.Errorf("downstream api.address: got %q", d.API.Address)
 	}
-	if d.TrafficAddress != "http://traefik-primary:80" {
-		t.Errorf("downstream traffic_address: got %q", d.TrafficAddress)
+	if d.Traffic.Address != "http://traefik-primary:80" {
+		t.Errorf("downstream traffic.address: got %q", d.Traffic.Address)
 	}
 }
 
@@ -63,20 +63,20 @@ func TestLoad_MinimalValid(t *testing.T) {
 func TestLoad_MissingAPIAddress(t *testing.T) {
 	_, err := config.Load("testdata/missing_api_address.yaml")
 	if err == nil {
-		t.Fatal("expected error for missing api_address, got nil")
+		t.Fatal("expected error for missing api.address, got nil")
 	}
-	if !containsField(err, "api_address") {
-		t.Errorf("error must name 'api_address', got: %v", err)
+	if !containsField(err, "api.address") {
+		t.Errorf("error must name 'api.address', got: %v", err)
 	}
 }
 
 func TestLoad_MissingTrafficAddress(t *testing.T) {
 	_, err := config.Load("testdata/missing_traffic_address.yaml")
 	if err == nil {
-		t.Fatal("expected error for missing traffic_address, got nil")
+		t.Fatal("expected error for missing traffic.address, got nil")
 	}
-	if !containsField(err, "traffic_address") {
-		t.Errorf("error must name 'traffic_address', got: %v", err)
+	if !containsField(err, "traffic.address") {
+		t.Errorf("error must name 'traffic.address', got: %v", err)
 	}
 }
 
@@ -169,28 +169,28 @@ func TestLoad_DownstreamOptionalFields(t *testing.T) {
 	if d.StalenessLimit != 2*time.Minute {
 		t.Errorf("staleness_limit: got %v, want 2m", d.StalenessLimit)
 	}
-	if d.Auth == nil {
+	if d.API.Auth == nil {
 		t.Fatal("auth must be populated")
 	}
-	if d.Auth.Username != "admin" {
-		t.Errorf("auth.username: got %q, want %q", d.Auth.Username, "admin")
+	if d.API.Auth.Username != "admin" {
+		t.Errorf("auth.username: got %q, want %q", d.API.Auth.Username, "admin")
 	}
-	if d.TLS == nil {
+	if d.API.TLS == nil {
 		t.Fatal("tls must be populated")
 	}
-	if d.TLS.CA != "/etc/ssl/ca.crt" {
-		t.Errorf("tls.ca: got %q, want %q", d.TLS.CA, "/etc/ssl/ca.crt")
+	if d.API.TLS.CA != "/etc/ssl/ca.crt" {
+		t.Errorf("tls.ca: got %q, want %q", d.API.TLS.CA, "/etc/ssl/ca.crt")
 	}
 }
 
-// URL validation: a non-absolute api_address must produce an error that names
+// URL validation: a non-absolute api.address must produce an error that names
 // the field and the offending value.
 func TestLoad_InvalidAPIURL(t *testing.T) {
 	_, err := config.Load("testdata/invalid_api_url.yaml")
 	if err == nil {
-		t.Fatal("expected error for non-absolute api_address, got nil")
+		t.Fatal("expected error for non-absolute api.address, got nil")
 	}
-	if !containsField(err, "api_address") {
+	if !containsField(err, "api.address") {
 		t.Errorf("error must name the field, got: %v", err)
 	}
 }
@@ -204,8 +204,10 @@ edge_entrypoints:
   - websecure
 downstreams:
   - name: primary
-    api_address: http://traefik:8080
-    traffic_address: http://traefik:80
+    api:
+      address: http://traefik:8080
+    traffic:
+      address: http://traefik:80
     allowed_entrypoints:
       - web
 `)
@@ -226,8 +228,10 @@ edge_entrypoints:
   - websecure
 downstreams:
   - name: primary
-    api_address: http://traefik:8080
-    traffic_address: http://traefik:80
+    api:
+      address: http://traefik:8080
+    traffic:
+      address: http://traefik:80
     allowed_entrypoints:
       - web
 `)
@@ -249,8 +253,10 @@ edge_entrypoints:
   - websecure
 downstreams:
   - name: primary
-    api_address: http://traefik:8080
-    traffic_address: http://traefik:80
+    api:
+      address: http://traefik:8080
+    traffic:
+      address: http://traefik:80
     allowed_entrypoints:
       - web
 `)
@@ -274,8 +280,10 @@ edge_entrypoints:
   - websecure
 downstreams:
   - name: primary
-    api_address: http://traefik:8080
-    traffic_address: http://traefik:80
+    api:
+      address: http://traefik:8080
+    traffic:
+      address: http://traefik:80
     allowed_entrypoints:
       - web
 `, reserved))
@@ -297,8 +305,10 @@ edge_entrypoints:
   - websecure
 downstreams:
   - name: primary
-    api_address: http://traefik:8080
-    traffic_address: http://traefik:80
+    api:
+      address: http://traefik:8080
+    traffic:
+      address: http://traefik:80
     allowed_entrypoints:
       - web
 `)
@@ -318,8 +328,10 @@ func TestLoad_EmptyEdgeEntrypoints_ReturnsError(t *testing.T) {
 	path := writeYAML(t, `
 downstreams:
   - name: primary
-    api_address: http://traefik:8080
-    traffic_address: http://traefik:80
+    api:
+      address: http://traefik:8080
+    traffic:
+      address: http://traefik:80
     allowed_entrypoints:
       - web
 `)
@@ -340,8 +352,10 @@ edge_entrypoints:
   - websecure
 downstreams:
   - name: primary
-    api_address: http://traefik:8080
-    traffic_address: http://traefik:80
+    api:
+      address: http://traefik:8080
+    traffic:
+      address: http://traefik:80
     allowed_entrypoints:
       - web
 `)
@@ -363,8 +377,10 @@ edge_entrypoints:
   - websecure
 downstreams:
   - name: primary
-    api_address: http://traefik:8080
-    traffic_address: http://traefik:80
+    api:
+      address: http://traefik:8080
+    traffic:
+      address: http://traefik:80
     allowed_entrypoints:
       - web
 `, level))
@@ -385,8 +401,10 @@ edge_entrypoints:
   - websecure
 downstreams:
   - name: primary
-    api_address: http://traefik:8080
-    traffic_address: http://traefik:80
+    api:
+      address: http://traefik:8080
+    traffic:
+      address: http://traefik:80
     allowed_entrypoints:
       - web
 `)
@@ -408,8 +426,10 @@ edge_entrypoints:
   - websecure
 downstreams:
   - name: primary
-    api_address: http://traefik:8080
-    traffic_address: http://traefik:80
+    api:
+      address: http://traefik:8080
+    traffic:
+      address: http://traefik:80
     allowed_entrypoints:
       - web
 `, format))
@@ -431,8 +451,10 @@ edge_entrypoints:
   - websecure
 downstreams:
   - name: primary
-    api_address: http://traefik:8080
-    traffic_address: http://traefik:80
+    api:
+      address: http://traefik:8080
+    traffic:
+      address: http://traefik:80
     allowed_entrypoints:
       - web
 `)
@@ -454,8 +476,10 @@ edge_entrypoints:
   - websecure
 downstreams:
   - name: primary
-    api_address: http://traefik:8080
-    traffic_address: http://traefik:80
+    api:
+      address: http://traefik:8080
+    traffic:
+      address: http://traefik:80
 `)
 	_, err := config.Load(path)
 	if err == nil {
@@ -491,28 +515,60 @@ edge_entrypoints:
   - websecure
 downstreams:
   - name: primary
-    api_address: http://traefik:8080
-    traffic_address: http://traefik:80
+    api:
+      address: http://traefik:8080
+      auth:
+        headers:
+          Authorization: "Bearer mytoken"
+          X-Api-Key: "my-api-key"
+    traffic:
+      address: http://traefik:80
     allowed_entrypoints:
       - web
-    auth:
-      headers:
-        Authorization: "Bearer mytoken"
-        X-Api-Key: "my-api-key"
 `)
 	cfg, err := config.Load(path)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	d := cfg.Downstreams[0]
-	if d.Auth == nil {
+	if d.API.Auth == nil {
 		t.Fatal("auth must be populated")
 	}
-	if d.Auth.Headers["Authorization"] != "Bearer mytoken" {
-		t.Errorf("Authorization header: got %q, want %q", d.Auth.Headers["Authorization"], "Bearer mytoken")
+	if d.API.Auth.Headers["Authorization"] != "Bearer mytoken" {
+		t.Errorf("Authorization header: got %q, want %q", d.API.Auth.Headers["Authorization"], "Bearer mytoken")
 	}
-	if d.Auth.Headers["X-Api-Key"] != "my-api-key" {
-		t.Errorf("X-Api-Key header: got %q, want %q", d.Auth.Headers["X-Api-Key"], "my-api-key")
+	if d.API.Auth.Headers["X-Api-Key"] != "my-api-key" {
+		t.Errorf("X-Api-Key header: got %q, want %q", d.API.Auth.Headers["X-Api-Key"], "my-api-key")
+	}
+}
+
+// traffic.tls shares its key name with api.tls but configures the
+// edge-to-downstream hop, so setting one must not populate the other.
+func TestLoad_DownstreamTrafficTLS(t *testing.T) {
+	path := writeYAML(t, `
+edge_entrypoints:
+  - websecure
+downstreams:
+  - name: primary
+    api:
+      address: http://traefik:8080
+    traffic:
+      address: https://traefik:443
+      tls:
+        insecure_skip_verify: true
+    allowed_entrypoints:
+      - websecure
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	d := cfg.Downstreams[0]
+	if d.Traffic.TLS == nil || !d.Traffic.TLS.InsecureSkipVerify {
+		t.Errorf("traffic.tls.insecure_skip_verify must be true, got %+v", d.Traffic.TLS)
+	}
+	if d.API.TLS != nil {
+		t.Errorf("api.tls must stay unset, got %+v", d.API.TLS)
 	}
 }
 
@@ -523,12 +579,14 @@ edge_entrypoints:
   - websecure
 downstreams:
   - name: primary
-    api_address: http://traefik:8080
-    traffic_address: http://traefik:80
+    api:
+      address: http://traefik:8080
+      auth:
+        username: alice
+    traffic:
+      address: http://traefik:80
     allowed_entrypoints:
       - web
-    auth:
-      username: alice
 `)
 	_, err := config.Load(path)
 	if err == nil {
@@ -546,12 +604,14 @@ edge_entrypoints:
   - websecure
 downstreams:
   - name: primary
-    api_address: http://traefik:8080
-    traffic_address: http://traefik:80
+    api:
+      address: http://traefik:8080
+      auth:
+        password: secret
+    traffic:
+      address: http://traefik:80
     allowed_entrypoints:
       - web
-    auth:
-      password: secret
 `)
 	_, err := config.Load(path)
 	if err == nil {
@@ -569,12 +629,14 @@ edge_entrypoints:
   - websecure
 downstreams:
   - name: primary
-    api_address: http://traefik:8080
-    traffic_address: http://traefik:80
+    api:
+      address: http://traefik:8080
+      tls:
+        cert: /etc/ssl/client.crt
+    traffic:
+      address: http://traefik:80
     allowed_entrypoints:
       - web
-    tls:
-      cert: /etc/ssl/client.crt
 `)
 	_, err := config.Load(path)
 	if err == nil {
@@ -592,12 +654,14 @@ edge_entrypoints:
   - websecure
 downstreams:
   - name: primary
-    api_address: http://traefik:8080
-    traffic_address: http://traefik:80
+    api:
+      address: http://traefik:8080
+      tls:
+        key: /etc/ssl/client.key
+    traffic:
+      address: http://traefik:80
     allowed_entrypoints:
       - web
-    tls:
-      key: /etc/ssl/client.key
 `)
 	_, err := config.Load(path)
 	if err == nil {
@@ -625,8 +689,8 @@ func TestLoad_ExampleConfig(t *testing.T) {
 	// the file doubles as schema documentation.
 	var seenAuth, seenTLS, seenPriority, seenStaleness bool
 	for _, d := range cfg.Downstreams {
-		seenAuth = seenAuth || d.Auth != nil
-		seenTLS = seenTLS || d.TLS != nil
+		seenAuth = seenAuth || d.API.Auth != nil
+		seenTLS = seenTLS || d.API.TLS != nil
 		seenPriority = seenPriority || d.PriorityOffset != 0
 		seenStaleness = seenStaleness || d.StalenessLimit > 0
 	}
@@ -656,15 +720,17 @@ edge_entrypoints:
   - websecure
 downstreams:
   - name: primary
-    api_address: http://traefik:8080
-    traffic_address: http://traefik:80
+    api:
+      address: http://traefik:8080
+      auth:
+        headers:
+          X-Api-Key: mykey
+        username: alice
+        password: secret
+    traffic:
+      address: http://traefik:80
     allowed_entrypoints:
       - web
-    auth:
-      headers:
-        X-Api-Key: mykey
-      username: alice
-      password: secret
 `)
 	_, err := config.Load(path)
 	if err == nil {
