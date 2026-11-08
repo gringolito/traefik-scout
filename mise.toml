@@ -3,7 +3,7 @@
 # `mise run <task>` to execute one.
 
 [tools]
-go = "1.27.0"              # Keep in sync with go.mod
+go = "1.27.3"              # Keep in sync with go.mod
 # golangci-lint is pinned in .tool-versions so CI's golangci-lint-action can
 # read it via `version-file`; mise merges both files.
 
