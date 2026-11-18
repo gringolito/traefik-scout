@@ -41,5 +41,5 @@ jobs:
     needs: [lint, test]
     uses: ./.github/workflows/docker.yaml
     with:
-      tags: edge
+      tag: edge
     secrets: inherit
