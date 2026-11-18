@@ -27,29 +27,19 @@ jobs:
       - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10
       - run: mise run test
 
-  publish:
-    needs: [lint, test]
-    runs-on: ubuntu-latest
+  # Resolves the vX.Y, vX, and latest aliases from the release tags
+  # already published on Docker Hub, so a backport release can never
+  # move a newer alias or latest backward. A prerelease tag (e.g.
+  # v2.0.0-rc.1) always publishes only itself.
+  tags:
+    runs-on: ubuntu-24.04-arm
     env:
       IMAGE: docker.io/gringolito/traefik-scout
+    outputs:
+      tags: ${{ steps.resolve.outputs.tags }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
-
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
-      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      # Resolves the vX.Y, vX, and latest aliases from the release tags
-      # already published on Docker Hub, so a backport release can never
-      # move a newer alias or latest backward. A prerelease tag (e.g.
-      # v2.0.0-rc.1) always publishes only itself.
       - name: Resolve image tags
-        id: tags
+        id: resolve
         run: |
           base_url="https://hub.docker.com/v2/repositories/${IMAGE#docker.io/}/tags?page_size=100"
           url="$base_url"
@@ -77,7 +67,7 @@ jobs:
           minor="${BASH_REMATCH[2]}"
           prerelease="${BASH_REMATCH[3]}"
 
-          tags=("${IMAGE}:${current_tag}")
+          tags=("${current_tag}")
           if [ -z "$prerelease" ]; then
             release_tags="$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' published-tags.txt || true)"
             all_tags="$(printf '%s\n%s\n' "$current_tag" "$release_tags" | sed '/^$/d')"
@@ -85,13 +75,13 @@ jobs:
             major_latest="$(grep -E "^v${major}\." <<<"$all_tags" | sort -V | tail -n1)"
             minor_latest="$(grep -E "^v${major}\.${minor}\." <<<"$all_tags" | sort -V | tail -n1)"
             if [ "$current_tag" = "$minor_latest" ]; then
-              tags+=("${IMAGE}:v${major}.${minor}")
+              tags+=("v${major}.${minor}")
             fi
             if [ "$current_tag" = "$major_latest" ]; then
-              tags+=("${IMAGE}:v${major}")
+              tags+=("v${major}")
             fi
             if [ "$current_tag" = "$global_latest" ]; then
-              tags+=("${IMAGE}:latest")
+              tags+=("latest")
             fi
           fi
 
@@ -101,12 +91,9 @@ jobs:
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
-      # One buildx build with every resolved tag: all tags land on the same
-      # multi-arch digest.
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.tags.outputs.tags }}
-          provenance: false
+  publish:
+    needs: [lint, test, tags]
+    uses: ./.github/workflows/docker.yaml
+    with:
+      tags: ${{ needs.tags.outputs.tags }}
+    secrets: inherit
