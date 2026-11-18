@@ -1,0 +1,161 @@
+name: Docker
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Image tag to publish.
+        type: string
+        required: true
+      release-aliases:
+        description: Also publish the vX.Y, vX, and latest aliases the release tag is entitled to.
+        type: boolean
+        default: false
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: true
+      DOCKERHUB_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: docker.io/gringolito/traefik-scout
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Pushed untagged; the merge job tags the combined manifest list.
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          provenance: false
+
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Resolves the vX.Y, vX, and latest aliases from the release tags
+      # already published on Docker Hub, so a backport release can never
+      # move a newer alias or latest backward. A prerelease tag (e.g.
+      # v2.0.0-rc.1) always publishes only itself. Runs right before the
+      # push so a re-run resolves against the current registry state.
+      - name: Resolve release aliases
+        id: aliases
+        if: inputs.release-aliases
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          base_url="https://hub.docker.com/v2/repositories/${IMAGE#docker.io/}/tags?page_size=100"
+          url="$base_url"
+          : > published-tags.txt
+          while [ -n "$url" ]; do
+            set +e
+            response="$(curl -fsSL "$url")"
+            status=$?
+            set -e
+            if [ "$status" -eq 22 ] && [ "$url" = "$base_url" ]; then
+              response='{"results":[]}'
+            elif [ "$status" -ne 0 ]; then
+              exit 1
+            fi
+            jq -r '.results[].name' <<<"$response" >> published-tags.txt
+            url="$(jq -r '.next // empty' <<<"$response")"
+          done
+
+          if [[ ! "$TAG" =~ ^v([0-9]+)\.([0-9]+)\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::not a valid semver release tag: $TAG"
+            exit 1
+          fi
+          major="${BASH_REMATCH[1]}"
+          minor="${BASH_REMATCH[2]}"
+          prerelease="${BASH_REMATCH[3]}"
+
+          tags=("$TAG")
+          if [ -z "$prerelease" ]; then
+            release_tags="$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' published-tags.txt || true)"
+            all_tags="$(printf '%s\n%s\n' "$TAG" "$release_tags" | sed '/^$/d')"
+            global_latest="$(sort -V <<<"$all_tags" | tail -n1)"
+            major_latest="$(grep -E "^v${major}\." <<<"$all_tags" | sort -V | tail -n1)"
+            minor_latest="$(grep -E "^v${major}\.${minor}\." <<<"$all_tags" | sort -V | tail -n1)"
+            if [ "$TAG" = "$minor_latest" ]; then
+              tags+=("v${major}.${minor}")
+            fi
+            if [ "$TAG" = "$major_latest" ]; then
+              tags+=("v${major}")
+            fi
+            if [ "$TAG" = "$global_latest" ]; then
+              tags+=("latest")
+            fi
+          fi
+
+          {
+            echo 'tags<<EOF'
+            printf '%s\n' "${tags[@]}"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      # Every tag lands on the same multi-arch digest.
+      - name: Publish manifest list
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          TAGS: ${{ steps.aliases.outputs.tags || inputs.tag }}
+        run: |
+          tag_args=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && tag_args+=(--tag "${IMAGE}:${tag}")
+          done <<<"$TAGS"
+          sources=()
+          for digest in *; do
+            sources+=("${IMAGE}@sha256:${digest}")
+          done
+          docker buildx imagetools create "${tag_args[@]}" "${sources[@]}"
+          docker buildx imagetools inspect "${tag_args[1]}"
