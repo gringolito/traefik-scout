@@ -491,10 +491,8 @@ func isInternalProvider(name, provider string) bool {
 
 // stripProvider removes the "@provider" qualifier from a Traefik router key.
 func stripProvider(name string) string {
-	if i := strings.LastIndex(name, "@"); i >= 0 {
-		return name[:i]
-	}
-	return name
+	before, _, _ := strings.CutLast(name, "@")
+	return before
 }
 
 func entrypointSet(eps []string) map[string]struct{} {
